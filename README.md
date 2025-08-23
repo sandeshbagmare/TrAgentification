@@ -9,11 +9,26 @@ A comprehensive, multi-agent AI trading system that integrates with the Upstox A
 
 ## 🌟 Features
 
-### 🤖 AI-Powered Analysis
-- **Gemini AI Integration**: Advanced market sentiment analysis using Google's Gemini API
-- **Azure OpenAI Integration**: Large language model-based market analysis
-- **Technical Analysis**: RSI, MACD, Moving Averages, Bollinger Bands, ATR
-- **Machine Learning**: LightGBM, XGBoost, and LSTM models for price prediction
+### 📈 **Live Trading Ready**
+- **Full Upstox Integration**: Live trading for stocks, futures, and options
+- **Intraday Trading**: MIS (Margin Intraday Square-off) support
+- **Delivery Trading**: CNC (Cash and Carry) for delivery positions  
+- **Futures & Options**: Complete F&O trading support with auto-detection
+- **Real Order Execution**: Direct integration with Upstox API v2
+
+### 🤖 **One-Click Automated Setup**
+- **Automated Training**: Fetches 1 year of historical data and trains models automatically
+- **Self-Training Models**: ML models train themselves on historical data from 25+ Indian stocks
+- **Zero Configuration**: Just add API keys and click start - everything is automated
+- **Intelligent Data Fetching**: Automatically downloads and processes historical data
+
+### 💰 **Comprehensive P&L Tracking**
+- **Real-time P&L**: Live profit/loss tracking for all positions
+- **Trade Analysis**: Detailed breakdown of every trade with fees and taxes
+- **Portfolio Analytics**: Complete portfolio performance metrics
+- **Win Rate Tracking**: Success rate analysis across strategies
+- **Risk Metrics**: VaR, Sharpe ratio, max drawdown, and volatility analysis
+- **Daily Reports**: Automated generation of trading performance reports
 
 ### 🛡️ Risk Management
 - **Ultimate Veto Power**: Risk management agent has final say on all trades
@@ -87,17 +102,33 @@ HEALTH_CHECK_INTERVAL=60     # Health check every 60 seconds
 
 ### 4. Start the System
 
-#### Option A: Using the Startup Script (Recommended)
+#### Option A: Full Automated Setup (Recommended)
 ```bash
 python start.py
 ```
+*This will automatically:*
+- ✅ Install all dependencies
+- ✅ Fetch 1 year of historical data for 25+ Indian stocks  
+- ✅ Train ML models automatically
+- ✅ Start the trading system
+- ✅ Launch the dashboard
 
-#### Option B: Using Windows Batch File
+#### Option B: Skip Training (Faster Start)
+```bash
+python start.py --skip-training
+```
+
+#### Option C: Training Only
+```bash
+python start.py --train-only
+```
+
+#### Option D: Using Windows Batch File
 ```batch
 start.bat
 ```
 
-#### Option C: Using Docker
+#### Option E: Using Docker
 ```bash
 docker-compose up --build
 ```

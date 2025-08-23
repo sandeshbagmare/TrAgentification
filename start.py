@@ -179,8 +179,8 @@ class TradingSystemStarter:
             logger.warning(f"⚠️ Error running tests: {e}")
             return True
     
-    def start_trading_system(self) -> bool:
-        """Start the main trading system"""
+    def start_trading_system(self, skip_training: bool = False) -> bool:
+        """Start the main trading system with optional automated training"""
         logger.info("🚀 Starting AI Trading System...")
         
         try:
@@ -188,9 +188,40 @@ class TradingSystemStarter:
             sys.path.append(str(self.project_root))
             from main import initialize_trading_system, run_trading_system
             
+            # Run automated training if not skipped
+            if not skip_training:
+                logger.info("🤖 Running automated training first...")
+                
+                # Import and run automated trainer
+                from agents.automated_trainer import run_automated_training
+                
+                # Run training in the background
+                import asyncio
+                
+                async def run_training():
+                    training_result = await run_automated_training(365)  # 1 year of data
+                    if training_result.get('success'):
+                        logger.info("✅ Automated training completed successfully")
+                        logger.info(f"📊 Trained on {training_result.get('symbols_processed', 0)} symbols")
+                        logger.info(f"🤖 {training_result.get('total_samples', 0)} samples processed")
+                    else:
+                        logger.warning(f"⚠️ Training failed: {training_result.get('error', 'Unknown error')}")
+                        logger.warning("System will continue with existing models or technical analysis only")
+                
+                # Run training
+                try:
+                    asyncio.run(run_training())
+                except Exception as e:
+                    logger.warning(f"⚠️ Training failed: {str(e)}")
+                    logger.warning("Continuing without automated training...")
+            
             # Initialize components
             components = initialize_trading_system()
             logger.info("✅ Trading system components initialized.")
+            
+            # Initialize P&L tracking
+            from agents.pnl_tracker import pnl_tracker
+            logger.info("✅ P&L tracking system initialized.")
             
             # Start the trading system in background
             import threading
@@ -288,7 +319,7 @@ class TradingSystemStarter:
         logger.info("🛑 To stop the system: Press Ctrl+C")
         logger.info("=" * 60)
     
-    def run(self, use_docker: bool = False):
+    def run(self, use_docker: bool = False, skip_training: bool = False):
         """Main entry point to start the trading system"""
         try:
             # Display banner
@@ -313,7 +344,7 @@ class TradingSystemStarter:
                 if not self.run_tests():
                     logger.warning("⚠️ Test issues detected, but continuing...")
                 
-                if not self.start_trading_system():
+                if not self.start_trading_system(skip_training=skip_training):
                     return False
                 
                 if not self.start_dashboard():
@@ -342,6 +373,8 @@ def main():
     parser.add_argument('--docker', action='store_true', help='Start using Docker')
     parser.add_argument('--test-only', action='store_true', help='Run tests only')
     parser.add_argument('--dashboard-only', action='store_true', help='Start dashboard only')
+    parser.add_argument('--skip-training', action='store_true', help='Skip automated training')
+    parser.add_argument('--train-only', action='store_true', help='Run training only')
     
     args = parser.parse_args()
     
@@ -357,8 +390,21 @@ def main():
                 time.sleep(10)
         except KeyboardInterrupt:
             logger.info("🛑 Dashboard stopped.")
+    elif args.train_only:
+        # Run training only
+        import asyncio
+        
+        async def run_training_only():
+            from agents.automated_trainer import run_automated_training
+            result = await run_automated_training(365)
+            if result.get('success'):
+                logger.info("✅ Training completed successfully!")
+            else:
+                logger.error(f"❌ Training failed: {result.get('error')}")
+        
+        asyncio.run(run_training_only())
     else:
-        starter.run(use_docker=args.docker)
+        starter.run(use_docker=args.docker, skip_training=args.skip_training)
 
 if __name__ == "__main__":
     main()

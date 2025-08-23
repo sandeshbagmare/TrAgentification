@@ -534,18 +534,20 @@ class ExecutionEngine:
             
     async def place_order(self, order_details: Dict) -> Dict:
         """
-        Place a new order
+        Place a new order for stocks, futures, and intraday trading
         
         Args:
             order_details: Dictionary containing order details
             {
-                'symbol': 'RELIANCE',
+                'symbol': 'RELIANCE' or 'NIFTY23JUL19500CE',
                 'quantity': 100,
                 'price': 2500.0,
                 'side': 'buy',  # 'buy' or 'sell'
                 'order_type': 'limit',  # 'limit', 'market', 'stop_loss', 'take_profit'
-                'product': 'INTRADAY',  # 'INTRADAY', 'CNC', 'MIS'
-                'validity': 'DAY'  # 'DAY', 'IOC'
+                'product': 'CNC',  # 'CNC' (delivery), 'MIS' (intraday), 'NRML' (normal/futures)
+                'validity': 'DAY',  # 'DAY', 'IOC'
+                'exchange': 'NSE',  # 'NSE', 'BSE', 'NFO' (for futures)
+                'instrument_type': 'EQ'  # 'EQ' (equity), 'CE' (call), 'PE' (put), 'FUT' (futures)
             }
             
         Returns:
@@ -562,21 +564,44 @@ class ExecutionEngine:
             if not order_details.get('side') in ['buy', 'sell']:
                 return {'success': False, 'error': 'Order side must be buy or sell'}
             
-            # Create order payload for Upstox API
+            # Determine product type based on symbol and user preference
+            symbol = order_details['symbol']
+            product_type = order_details.get('product', 'MIS')  # Default to intraday
+            exchange = order_details.get('exchange', 'NSE')
+            instrument_type = order_details.get('instrument_type', 'EQ')
+            
+            # Auto-detect futures/options from symbol
+            if any(x in symbol for x in ['FUT', 'CE', 'PE']) or len(symbol) > 10:
+                exchange = 'NFO'  # National Stock Exchange Futures & Options
+                if 'CE' in symbol or 'PE' in symbol:
+                    instrument_type = 'CE' if 'CE' in symbol else 'PE'
+                elif 'FUT' in symbol:
+                    instrument_type = 'FUT'
+                if product_type == 'CNC':  # Can't do delivery for F&O
+                    product_type = 'NRML'
+            
+            # Create order payload for Upstox API v2
             order_payload = {
-                "symbol": f"{order_details['symbol']}",
-                "quantity": order_details['quantity'],
-                "price": order_details.get('price', 0),
+                "instrument_token": symbol,  # Will be resolved by Upstox
+                "quantity": int(order_details['quantity']),
+                "price": float(order_details.get('price', 0)),
                 "transaction_type": order_details['side'].upper(),
                 "order_type": order_details['order_type'].upper(),
-                "product": order_details.get('product', 'INTRADAY'),
-                "validity": order_details.get('validity', 'DAY')
+                "product": product_type,
+                "validity": order_details.get('validity', 'DAY'),
+                "disclosed_quantity": 0,
+                "trigger_price": float(order_details.get('trigger_price', 0)),
+                "is_amo": False  # After Market Order
             }
             
-            # Create order object
+            # For market orders, set price to 0
+            if order_details.get('order_type', '').lower() == 'market':
+                order_payload['price'] = 0
+            
+            # Create order object for tracking
             order = Order(
                 order_id=self.order_manager.generate_order_id(),
-                symbol=order_details.get('symbol'),
+                symbol=symbol,
                 quantity=order_details.get('quantity'),
                 price=order_details.get('price'),
                 order_type=order_details.get('order_type', 'limit'),
@@ -589,7 +614,7 @@ class ExecutionEngine:
             # Add to order manager
             self.order_manager.add_order(order)
             
-            # Place order via Upstox API
+            # Place order via Upstox API v2
             api_result = await self._make_api_request(
                 "order/place", 
                 method="POST",
@@ -597,38 +622,49 @@ class ExecutionEngine:
             )
             
             # Process API result
-            if api_result.get("status") == "success" and api_result.get("data", {}).get("status") == "success":
-                order_id = api_result.get("data", {}).get("order_id")
+            if api_result.get("status") == "success":
+                upstox_order_id = api_result.get("data", {}).get("order_id")
+                
+                # Wait a moment for order to be processed
+                await asyncio.sleep(0.5)
                 
                 # Get order status to confirm execution
-                status_result = await self._make_api_request(
-                    f"order/status/{order_id}",
-                    method="GET"
-                )
+                try:
+                    status_result = await self._make_api_request(
+                        f"order/details/{upstox_order_id}",
+                        method="GET"
+                    )
+                    
+                    order_data = status_result.get("data", {})
+                    order_status = order_data.get("order_status", "pending")
+                    filled_quantity = float(order_data.get("filled_quantity", 0))
+                    avg_price = float(order_data.get("average_price", 0))
+                    
+                    # Update order with execution result
+                    if order_status.lower() in ['complete', 'filled']:
+                        order.status = 'filled'
+                        order.filled_quantity = filled_quantity
+                        order.filled_price = avg_price
+                    elif order_status.lower() == 'open':
+                        order.status = 'pending'
+                    elif filled_quantity > 0:
+                        order.status = 'partial'
+                        order.filled_quantity = filled_quantity
+                        order.filled_price = avg_price
+                    else:
+                        order.status = 'rejected'
+                        
+                except Exception as status_error:
+                    logger.warning(f"Could not get order status: {status_error}")
+                    # Assume order is pending if we can't get status
+                    order.status = 'pending'
                 
-                # Update order with execution result
-                execution_result = {
-                    "status": status_result.get("data", {}).get("status"),
-                    "filled_quantity": float(status_result.get("data", {}).get("filled_shares", 0)),
-                    "filled_price": float(status_result.get("data", {}).get("avg_execution_price", 0))
-                }
-                
-                if execution_result.get('status') == 'filled':
-                    order.filled_quantity = execution_result.get('filled_quantity', 0)
-                    order.filled_price = execution_result.get('filled_price', 0)
-                    order.status = 'filled'
-                elif execution_result.get('status') == 'partial':
-                    order.filled_quantity = execution_result.get('filled_quantity', 0)
-                    order.filled_price = execution_result.get('filled_price', 0)
-                    order.status = 'partial'
-                else:
-                    order.status = 'rejected'
-                
-                # Check slippage if applicable
-                if execution_result.get('filled_price') and order_details.get('price'):
+                # Calculate slippage if applicable
+                slippage = 0.0
+                if order.filled_price and order_details.get('price'):
                     slippage = self.smart_order_router.calculate_slippage(
                         order_details.get('price'),
-                        execution_result.get('filled_price')
+                        order.filled_price
                     )
                     
                     # Log large slippage
@@ -639,16 +675,28 @@ class ExecutionEngine:
                 return {
                     'success': True,
                     'order_id': order.order_id,
+                    'upstox_order_id': upstox_order_id,
                     'status': order.status,
                     'filled_quantity': order.filled_quantity,
                     'filled_price': order.filled_price,
-                    'slippage': slippage if 'slippage' in locals() else 0.0,
+                    'slippage': slippage,
+                    'product_type': product_type,
+                    'exchange': exchange,
+                    'instrument_type': instrument_type,
                     'timestamp': datetime.now().isoformat()
                 }
             else:
+                order.status = 'rejected'
+                error_msg = "Unknown error"
+                if api_result.get("errors"):
+                    error_msg = api_result["errors"][0].get("message", error_msg)
+                elif api_result.get("message"):
+                    error_msg = api_result["message"]
+                    
                 return {
                     'success': False,
-                    'error': api_result.get("errors", [{}])[0].get("message", "Unknown error"),
+                    'error': error_msg,
+                    'order_id': order.order_id,
                     'timestamp': datetime.now().isoformat()
                 }
             

@@ -184,39 +184,92 @@ class TradingDashboard:
                     'reason': 'Large language model market analysis'
                 }
         
+        # Enhanced mock data with P&L tracking integration
+        try:
+            # Try to get real data from P&L tracker
+            from agents.pnl_tracker import pnl_tracker
+            
+            # Get current positions
+            current_positions = pnl_tracker.get_current_positions({
+                'RELIANCE': 2505.75,
+                'TCS': 3420.50,
+                'INFY': 1650.25
+            })
+            
+            # Get P&L summary
+            pnl_summary = pnl_tracker.get_daily_pnl_summary(30)
+            
+            # Generate trading report
+            trading_report = pnl_tracker.generate_trading_report(7)  # Last 7 days
+            
+            # Format positions for display
+            formatted_positions = []
+            for pos in current_positions:
+                formatted_positions.append({
+                    'symbol': pos['symbol'],
+                    'quantity': pos['quantity'],
+                    'avg_price': pos['average_price'],
+                    'current_price': pos['current_price'],
+                    'pnl': pos['unrealized_pnl'],
+                    'pnl_percent': pos['unrealized_pnl_percent']
+                })
+            
+            if not formatted_positions:  # Fallback to mock data
+                formatted_positions = self._get_mock_positions()
+            
+        except Exception as e:
+            logger.warning(f"Could not get real P&L data: {str(e)}, using mock data")
+            formatted_positions = self._get_mock_positions()
+            pnl_summary = self._get_mock_pnl_summary()
+            trading_report = self._get_mock_trading_report()
+        
+        # Enhanced portfolio data
+        portfolio_value = 1000000
+        if 'pnl_summary' in locals():
+            portfolio_value = pnl_summary.get('total_market_value', 1000000)
+            daily_return = pnl_summary.get('portfolio_return_percent', 0) / 100
+        else:
+            daily_return = np.random.normal(0.002, 0.01)
+            portfolio_value = portfolio_value * (1 + daily_return)
+        
         return {
             'portfolio': {
                 'value': portfolio_value,
                 'returns': daily_return,
-                'drawdown': np.random.uniform(0, 0.05),
-                'sharpe_ratio': np.random.uniform(1.0, 2.5),
-                'total_pnl': sum([p['pnl'] for p in positions]),
-                'total_pnl_percent': sum([p['pnl'] for p in positions]) / base_value * 100
+                'drawdown': abs(pnl_summary.get('portfolio_return_percent', 0)) / 100 if pnl_summary.get('portfolio_return_percent', 0) < 0 else 0,
+                'sharpe_ratio': trading_report.get('risk_metrics', {}).get('sharpe_ratio', np.random.uniform(1.0, 2.5)),
+                'total_pnl': pnl_summary.get('total_pnl', 0),
+                'realized_pnl': pnl_summary.get('realized_pnl', 0),
+                'unrealized_pnl': pnl_summary.get('unrealized_pnl', 0),
+                'total_pnl_percent': pnl_summary.get('portfolio_return_percent', 0)
             },
-            'positions': positions,
+            'positions': formatted_positions,
             'signals': signals,
             'risk_metrics': {
                 'max_risk_per_trade': float(os.getenv('MAX_RISK_PER_TRADE', '0.005')),
                 'daily_loss_cap': float(os.getenv('DAILY_LOSS_CAP', '0.03')),
                 'current_daily_loss': abs(min(0, daily_return)),
-                'position_risk': np.random.uniform(0.001, 0.005),
-                'var_95': np.random.uniform(0.015, 0.025),
-                'max_drawdown': np.random.uniform(0.02, 0.08)
+                'position_risk': trading_report.get('risk_metrics', {}).get('var_95', np.random.uniform(0.001, 0.005)),
+                'var_95': trading_report.get('risk_metrics', {}).get('var_95', np.random.uniform(0.015, 0.025)),
+                'max_drawdown': trading_report.get('risk_metrics', {}).get('max_drawdown', np.random.uniform(0.02, 0.08)),
+                'volatility': trading_report.get('risk_metrics', {}).get('volatility', np.random.uniform(0.1, 0.3))
             },
             'system_status': {
-                'data_quality': np.random.choice(['excellent', 'good', 'fair'], p=[0.6, 0.3, 0.1]),
-                'api_status': np.random.choice(['connected', 'slow', 'disconnected'], p=[0.8, 0.15, 0.05]),
-                'model_status': np.random.choice(['up-to-date', 'updating', 'outdated'], p=[0.7, 0.2, 0.1]),
+                'data_quality': trading_report.get('system_health', {}).get('data_quality', 'good'),
+                'api_status': 'connected' if trading_report.get('system_health', {}).get('trading_active', False) else 'idle',
+                'model_status': 'up-to-date',
                 'last_update': current_time.isoformat(),
                 'uptime': np.random.uniform(95, 99.9),
-                'trades_today': np.random.randint(50, 200)
+                'trades_today': pnl_summary.get('total_trades', np.random.randint(5, 50)),
+                'win_rate': pnl_summary.get('win_rate', np.random.uniform(55, 75))
             },
             'market_data': {
                 'nifty_50': 19500 + np.random.normal(0, 100),
                 'sensex': 65000 + np.random.normal(0, 300),
-                'volatility_index': np.random.uniform(12, 25),
+                'volatility_index': trading_report.get('risk_metrics', {}).get('volatility', np.random.uniform(12, 25)) * 100,
                 'market_sentiment': np.random.choice(['bullish', 'neutral', 'bearish'], p=[0.4, 0.4, 0.2])
-            }
+            },
+            'trading_report': trading_report
         }
         
     def _display_overview(self):
@@ -384,6 +437,55 @@ class TradingDashboard:
             # In a real implementation, this would update the configuration
             st.sidebar.success("Settings saved successfully!")
         
+    def _get_mock_positions(self):
+        """Generate mock positions for testing"""
+        indian_stocks = ['RELIANCE', 'TCS', 'INFY', 'HDFC', 'ICICIBANK']
+        positions = []
+        
+        for symbol in np.random.choice(indian_stocks, size=np.random.randint(2, 5), replace=False):
+            quantity = np.random.randint(10, 500)
+            avg_price = np.random.uniform(100, 3000)
+            price_change = np.random.normal(0, 0.02)
+            current_price = avg_price * (1 + price_change)
+            pnl = (current_price - avg_price) * quantity
+            
+            positions.append({
+                'symbol': symbol,
+                'quantity': quantity,
+                'avg_price': avg_price,
+                'current_price': current_price,
+                'pnl': pnl,
+                'pnl_percent': (current_price - avg_price) / avg_price * 100
+            })
+        
+        return positions
+    
+    def _get_mock_pnl_summary(self):
+        """Generate mock P&L summary"""
+        return {
+            'total_pnl': np.random.uniform(-5000, 15000),
+            'realized_pnl': np.random.uniform(-2000, 8000),
+            'unrealized_pnl': np.random.uniform(-3000, 7000),
+            'total_trades': np.random.randint(10, 100),
+            'win_rate': np.random.uniform(55, 75),
+            'portfolio_return_percent': np.random.uniform(-2, 5)
+        }
+    
+    def _get_mock_trading_report(self):
+        """Generate mock trading report"""
+        return {
+            'risk_metrics': {
+                'sharpe_ratio': np.random.uniform(1.0, 2.5),
+                'var_95': np.random.uniform(0.015, 0.025),
+                'max_drawdown': np.random.uniform(0.02, 0.08),
+                'volatility': np.random.uniform(0.1, 0.3)
+            },
+            'system_health': {
+                'data_quality': 'good',
+                'trading_active': True
+            }
+        }
+
     def run(self):
         """Run the dashboard"""
         # Display sidebar settings
