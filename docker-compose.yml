@@ -1,0 +1,102 @@
+# docker-compose.yml for AI Trading System
+version: '3.8'
+
+services:
+  data-agent:
+    build: .
+    container_name: data-agent
+    command: python -m agents.data_agent
+    environment:
+      - AGENT_TYPE=data
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  technical-agent:
+    build: .
+    container_name: technical-agent
+    command: python -m agents.technical_agent
+    environment:
+      - AGENT_TYPE=technical
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  ml-agent:
+    build: .
+    container_name: ml-agent
+    command: python -m agents.ml_agent
+    environment:
+      - AGENT_TYPE=ml
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  strategy-orchestrator:
+    build: .
+    container_name: strategy-orchestrator
+    command: python -m agents.strategy_orchestrator
+    environment:
+      - AGENT_TYPE=strategy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  risk-manager:
+    build: .
+    container_name: risk-manager
+    command: python -m agents.risk_manager
+    environment:
+      - AGENT_TYPE=risk
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  execution-engine:
+    build: .
+    container_name: execution-engine
+    command: python -m agents.execution_engine
+    environment:
+      - AGENT_TYPE=execution
+      - UPSTOX_API_KEY=${UPSTOX_API_KEY}
+      - UPSTOX_API_SECRET=${UPSTOX_API_SECRET}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  monitoring-agent:
+    build: .
+    container_name: monitoring-agent
+    command: python -m agents.monitoring_agent
+    environment:
+      - AGENT_TYPE=monitoring
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    command: streamlit run dashboard/app.py --server.port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - UPSTOX_API_KEY=$UPSTOX_API_KEY
+      - UPSTOX_API_SECRET=$UPSTOX_API_SECRET
+      - GEMINI_API_KEY=$GEMINI_API_KEY
+      - AZURE_OPENAI_API_KEY=$AZURE_OPENAI_API_KEY
+      - AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT
+    volumes:
+      - .:/app
+    restart: unless-stopped
