@@ -7,6 +7,10 @@ import logging
 import pandas as pd
 import numpy as np
 import statistics
+import os
+import json
+import aiohttp
+import sqlite3
 from collections import defaultdict
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Union
@@ -15,6 +19,8 @@ import requests
 import websockets
 import finnhub
 from alpha_vantage.async_support.timeseries import TimeSeries
+import yfinance as yf
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -64,23 +70,191 @@ class UpstoxDataSource(DataSource):
     
     async def get_historical_data(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
         """Get historical OHLC data from Upstox API"""
-        # Implementation for Upstox historical data
-        pass
+        try:
+            # Convert symbol to Upstox format
+            upstox_symbol = self._convert_to_upstox_symbol(symbol)
+            
+            # Calculate date range
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=limit if interval == 'D' else limit // 24)
+            
+            url = f"{self.rest_api_url}historical-candle/{upstox_symbol}/{interval}/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+            
+            headers = {
+                'Authorization': f'Bearer {os.getenv("UPSTOX_ACCESS_TOKEN")}',
+                'Accept': 'application/json'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        candles = data.get('data', {}).get('candles', [])
+                        
+                        # Convert to DataFrame
+                        df_data = []
+                        for candle in candles:
+                            df_data.append({
+                                'timestamp': pd.to_datetime(candle[0]),
+                                'open': float(candle[1]),
+                                'high': float(candle[2]),
+                                'low': float(candle[3]),
+                                'close': float(candle[4]),
+                                'volume': int(candle[5])
+                            })
+                        
+                        df = pd.DataFrame(df_data)
+                        if not df.empty:
+                            df.set_index('timestamp', inplace=True)
+                        return df
+                    else:
+                        logger.error(f"Upstox API error: {response.status}")
+                        return pd.DataFrame()
+        except Exception as e:
+            logger.error(f"Error fetching Upstox historical data: {e}")
+            return pd.DataFrame()
+    
+    def _convert_to_upstox_symbol(self, symbol: str) -> str:
+        """Convert symbol to Upstox format"""
+        # Basic conversion - in production, use proper symbol mapping
+        if symbol in ['NIFTY', 'BANKNIFTY']:
+            return f"NSE_INDEX|{symbol}"
+        else:
+            return f"NSE_EQ|{symbol}-EQ"
     
     async def get_tick_data(self, symbol: str) -> Dict:
         """Get real-time tick data from Upstox API"""
-        # Implementation for Upstox tick data
-        pass
+        try:
+            upstox_symbol = self._convert_to_upstox_symbol(symbol)
+            
+            url = f"{self.rest_api_url}market-quote/ltp"
+            params = {'symbol': upstox_symbol}
+            
+            headers = {
+                'Authorization': f'Bearer {os.getenv("UPSTOX_ACCESS_TOKEN")}',
+                'Accept': 'application/json'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        quote_data = data.get('data', {}).get(upstox_symbol, {})
+                        
+                        return {
+                            'symbol': symbol,
+                            'last_price': float(quote_data.get('last_price', 0)),
+                            'volume': int(quote_data.get('volume', 0)),
+                            'timestamp': datetime.now().isoformat(),
+                            'source': 'upstox'
+                        }
+                    else:
+                        logger.error(f"Upstox tick data error: {response.status}")
+                        return {}
+        except Exception as e:
+            logger.error(f"Error fetching Upstox tick data: {e}")
+            return {}
     
     async def subscribe_to_data(self, symbols: List[str]):
         """Subscribe to real-time data for symbols"""
-        # Implementation for Upstox subscription
-        pass
+        try:
+            if not self.connected:
+                await self.connect()
+            
+            # Convert symbols to Upstox format
+            upstox_symbols = [self._convert_to_upstox_symbol(symbol) for symbol in symbols]
+            
+            # Subscribe message
+            subscribe_message = {
+                "guid": "someguid",
+                "method": "sub",
+                "data": {
+                    "mode": "full",
+                    "instrumentKeys": upstox_symbols
+                }
+            }
+            
+            await self.websocket.send(json.dumps(subscribe_message))
+            logger.info(f"Subscribed to {len(symbols)} symbols via Upstox WebSocket")
+            
+            # Start listening for messages
+            asyncio.create_task(self._listen_websocket_messages())
+            
+        except Exception as e:
+            logger.error(f"Error subscribing to Upstox data: {e}")
+    
+    async def _listen_websocket_messages(self):
+        """Listen for WebSocket messages from Upstox"""
+        try:
+            async for message in self.websocket:
+                data = json.loads(message)
+                # Process incoming market data
+                await self._process_websocket_data(data)
+        except Exception as e:
+            logger.error(f"WebSocket listening error: {e}")
+    
+    async def _process_websocket_data(self, data: Dict):
+        """Process incoming WebSocket data"""
+        try:
+            # Extract and format market data
+            if data.get('type') == 'feed':
+                feed_data = data.get('feeds', {})
+                for symbol, quote in feed_data.items():
+                    processed_data = {
+                        'symbol': symbol,
+                        'last_price': float(quote.get('ltp', 0)),
+                        'volume': int(quote.get('vol', 0)),
+                        'timestamp': datetime.now().isoformat(),
+                        'source': 'upstox_websocket'
+                    }
+                    # Store or process the data as needed
+                    logger.debug(f"Received data for {symbol}: {processed_data}")
+        except Exception as e:
+            logger.error(f"Error processing WebSocket data: {e}")
     
     async def authenticate(self):
         """Authenticate with Upstox API"""
-        # Implementation for Upstox authentication
-        pass
+        try:
+            # In production, implement full OAuth flow
+            # For now, assume access token is available in environment
+            access_token = os.getenv('UPSTOX_ACCESS_TOKEN')
+            if not access_token:
+                logger.error("Upstox access token not found in environment")
+                return False
+            
+            # Verify token by making a simple API call
+            url = f"{self.rest_api_url}user/profile"
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        logger.info("Upstox authentication successful")
+                        return True
+                    else:
+                        logger.error(f"Upstox authentication failed: {response.status}")
+                        return False
+        except Exception as e:
+            logger.error(f"Upstox authentication error: {e}")
+            return False
+    
+    async def check_health(self) -> bool:
+        """Check if Upstox API is healthy"""
+        try:
+            url = f"{self.rest_api_url}market/status/NSE"
+            headers = {
+                'Authorization': f'Bearer {os.getenv("UPSTOX_ACCESS_TOKEN")}',
+                'Accept': 'application/json'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as response:
+                    return response.status == 200
+        except:
+            return False
 
 class FinnhubDataSource(DataSource):
     """Finnhub API data source implementation"""
@@ -104,18 +278,119 @@ class FinnhubDataSource(DataSource):
     
     async def get_historical_data(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
         """Get historical OHLC data from Finnhub API"""
-        # Implementation for Finnhub historical data
-        pass
+        try:
+            # Convert interval to Finnhub format
+            resolution = self._convert_interval_to_finnhub(interval)
+            
+            # Calculate timestamps
+            end_time = int(datetime.now().timestamp())
+            start_time = end_time - (limit * 24 * 60 * 60)  # Days to seconds
+            
+            # Get data from Finnhub
+            candles = self.finnhub_client.stock_candles(symbol, resolution, start_time, end_time)
+            
+            if candles['s'] == 'ok':
+                df_data = {
+                    'timestamp': pd.to_datetime(candles['t'], unit='s'),
+                    'open': candles['o'],
+                    'high': candles['h'],
+                    'low': candles['l'],
+                    'close': candles['c'],
+                    'volume': candles['v']
+                }
+                df = pd.DataFrame(df_data)
+                df.set_index('timestamp', inplace=True)
+                return df
+            else:
+                logger.warning(f"Finnhub returned no data for {symbol}")
+                return pd.DataFrame()
+                
+        except Exception as e:
+            logger.error(f"Error fetching Finnhub historical data: {e}")
+            return pd.DataFrame()
+    
+    def _convert_interval_to_finnhub(self, interval: str) -> str:
+        """Convert interval to Finnhub format"""
+        interval_map = {
+            '1m': '1',
+            '5m': '5',
+            '15m': '15',
+            '30m': '30',
+            '1h': '60',
+            '1d': 'D',
+            'D': 'D',
+            '1w': 'W',
+            '1M': 'M'
+        }
+        return interval_map.get(interval, 'D')
     
     async def get_tick_data(self, symbol: str) -> Dict:
         """Get real-time tick data from Finnhub API"""
-        # Implementation for Finnhub tick data
-        pass
+        try:
+            # Get current quote from Finnhub
+            quote = self.finnhub_client.quote(symbol)
+            
+            return {
+                'symbol': symbol,
+                'last_price': float(quote.get('c', 0)),  # Current price
+                'open': float(quote.get('o', 0)),
+                'high': float(quote.get('h', 0)),
+                'low': float(quote.get('l', 0)),
+                'prev_close': float(quote.get('pc', 0)),
+                'timestamp': datetime.now().isoformat(),
+                'source': 'finnhub'
+            }
+        except Exception as e:
+            logger.error(f"Error fetching Finnhub tick data: {e}")
+            return {}
     
     async def subscribe_to_data(self, symbols: List[str]):
         """Subscribe to real-time data for symbols"""
-        # Implementation for Finnhub subscription
-        pass
+        try:
+            # Finnhub WebSocket implementation
+            websocket_url = f"wss://ws.finnhub.io?token={self.api_key}"
+            
+            async with websockets.connect(websocket_url) as websocket:
+                # Subscribe to symbols
+                for symbol in symbols:
+                    subscribe_msg = {"type": "subscribe", "symbol": symbol}
+                    await websocket.send(json.dumps(subscribe_msg))
+                
+                logger.info(f"Subscribed to {len(symbols)} symbols via Finnhub WebSocket")
+                
+                # Listen for messages
+                async for message in websocket:
+                    data = json.loads(message)
+                    await self._process_finnhub_websocket_data(data)
+                    
+        except Exception as e:
+            logger.error(f"Error subscribing to Finnhub data: {e}")
+    
+    async def _process_finnhub_websocket_data(self, data: Dict):
+        """Process Finnhub WebSocket data"""
+        try:
+            if data.get('type') == 'trade':
+                trades = data.get('data', [])
+                for trade in trades:
+                    processed_data = {
+                        'symbol': trade.get('s'),
+                        'last_price': float(trade.get('p', 0)),
+                        'volume': int(trade.get('v', 0)),
+                        'timestamp': datetime.fromtimestamp(trade.get('t', 0) / 1000).isoformat(),
+                        'source': 'finnhub_websocket'
+                    }
+                    logger.debug(f"Received Finnhub trade data: {processed_data}")
+        except Exception as e:
+            logger.error(f"Error processing Finnhub WebSocket data: {e}")
+    
+    async def check_health(self) -> bool:
+        """Check if Finnhub API is healthy"""
+        try:
+            # Simple API call to check health
+            quote = self.finnhub_client.quote('AAPL')
+            return 'c' in quote
+        except:
+            return False
 
 class AlphaVantageDataSource(DataSource):
     """Alpha Vantage API data source implementation"""
@@ -138,20 +413,239 @@ class AlphaVantageDataSource(DataSource):
     
     async def get_historical_data(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
         """Get historical OHLC data from Alpha Vantage API"""
-        # Implementation for Alpha Vantage historical data
-        pass
+        try:
+            # Convert interval to Alpha Vantage format
+            av_interval = self._convert_interval_to_av(interval)
+            
+            if av_interval in ['1min', '5min', '15min', '30min', '60min']:
+                data, meta_data = await self.ts.get_intraday(symbol, interval=av_interval, outputsize='full')
+            else:
+                data, meta_data = await self.ts.get_daily(symbol, outputsize='full')
+            
+            if not data.empty:
+                # Rename columns to standard format
+                data.columns = ['open', 'high', 'low', 'close', 'volume']
+                data.index.name = 'timestamp'
+                
+                # Limit to requested number of records
+                if len(data) > limit:
+                    data = data.tail(limit)
+                    
+                return data
+            else:
+                return pd.DataFrame()
+                
+        except Exception as e:
+            logger.error(f"Error fetching Alpha Vantage historical data: {e}")
+            return pd.DataFrame()
+    
+    def _convert_interval_to_av(self, interval: str) -> str:
+        """Convert interval to Alpha Vantage format"""
+        interval_map = {
+            '1m': '1min',
+            '5m': '5min',
+            '15m': '15min',
+            '30m': '30min',
+            '1h': '60min',
+            '1d': 'daily',
+            'D': 'daily'
+        }
+        return interval_map.get(interval, 'daily')
     
     async def get_tick_data(self, symbol: str) -> Dict:
         """Get real-time tick data from Alpha Vantage API"""
-        # Implementation for Alpha Vantage tick data
-        pass
+        try:
+            # Alpha Vantage doesn't provide real-time tick data in free tier
+            # Use latest daily data instead
+            data, meta_data = await self.ts.get_daily(symbol, outputsize='compact')
+            
+            if not data.empty:
+                latest = data.iloc[-1]
+                return {
+                    'symbol': symbol,
+                    'last_price': float(latest['4. close']),
+                    'open': float(latest['1. open']),
+                    'high': float(latest['2. high']),
+                    'low': float(latest['3. low']),
+                    'volume': int(latest['5. volume']),
+                    'timestamp': data.index[-1].isoformat(),
+                    'source': 'alpha_vantage'
+                }
+            else:
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Error fetching Alpha Vantage tick data: {e}")
+            return {}
     
     async def subscribe_to_data(self, symbols: List[str]):
         """Subscribe to real-time data for symbols"""
-        # Implementation for Alpha Vantage subscription
-        pass
+        # Alpha Vantage doesn't support WebSocket subscriptions
+        # Implement polling mechanism instead
+        logger.info(f"Setting up polling for {len(symbols)} symbols via Alpha Vantage")
+        
+        async def poll_symbols():
+            while True:
+                for symbol in symbols:
+                    try:
+                        tick_data = await self.get_tick_data(symbol)
+                        if tick_data:
+                            logger.debug(f"Polled data for {symbol}: {tick_data}")
+                    except Exception as e:
+                        logger.error(f"Error polling {symbol}: {e}")
+                    await asyncio.sleep(1)  # Respect API limits
+                await asyncio.sleep(60)  # Poll every minute
+        
+        # Start polling task
+        asyncio.create_task(poll_symbols())
+    
+    async def check_health(self) -> bool:
+        """Check if Alpha Vantage API is healthy"""
+        try:
+            # Simple API call to check health
+            data, meta_data = await self.ts.get_daily('AAPL', outputsize='compact')
+            return not data.empty
+        except:
+            return False
 
-class DataAgent:
+class YFinanceDataSource(DataSource):
+    """Yahoo Finance data source implementation using yfinance"""
+    
+    def __init__(self):
+        self.connected = False
+        
+    async def connect(self):
+        """Check connection to Yahoo Finance"""
+        try:
+            # Test connection with a simple request
+            ticker = yf.Ticker('AAPL')
+            info = ticker.info
+            self.connected = True
+            logger.info("Connected to Yahoo Finance API")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to Yahoo Finance API: {str(e)}")
+            return False
+    
+    async def get_historical_data(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
+        """Get historical OHLC data from Yahoo Finance"""
+        try:
+            # Convert symbol for Indian stocks
+            yf_symbol = self._convert_to_yf_symbol(symbol)
+            
+            # Convert interval to yfinance format
+            yf_interval = self._convert_interval_to_yf(interval)
+            
+            # Calculate period
+            if limit <= 7:
+                period = "7d"
+            elif limit <= 30:
+                period = "1mo"
+            elif limit <= 90:
+                period = "3mo"
+            elif limit <= 365:
+                period = "1y"
+            else:
+                period = "2y"
+            
+            ticker = yf.Ticker(yf_symbol)
+            data = ticker.history(period=period, interval=yf_interval)
+            
+            if not data.empty:
+                # Standardize column names
+                data.columns = [col.lower().replace(' ', '_') for col in data.columns]
+                data.index.name = 'timestamp'
+                
+                # Limit to requested number of records
+                if len(data) > limit:
+                    data = data.tail(limit)
+                    
+                return data
+            else:
+                return pd.DataFrame()
+                
+        except Exception as e:
+            logger.error(f"Error fetching Yahoo Finance historical data: {e}")
+            return pd.DataFrame()
+    
+    def _convert_to_yf_symbol(self, symbol: str) -> str:
+        """Convert symbol to Yahoo Finance format"""
+        # Basic conversion for Indian stocks
+        if symbol in ['NIFTY', 'BANKNIFTY']:
+            return f"^{symbol}"
+        else:
+            return f"{symbol}.NS"  # NSE suffix
+    
+    def _convert_interval_to_yf(self, interval: str) -> str:
+        """Convert interval to yfinance format"""
+        interval_map = {
+            '1m': '1m',
+            '5m': '5m',
+            '15m': '15m',
+            '30m': '30m',
+            '1h': '1h',
+            '1d': '1d',
+            'D': '1d',
+            '1w': '1wk',
+            '1M': '1mo'
+        }
+        return interval_map.get(interval, '1d')
+    
+    async def get_tick_data(self, symbol: str) -> Dict:
+        """Get current quote from Yahoo Finance"""
+        try:
+            yf_symbol = self._convert_to_yf_symbol(symbol)
+            ticker = yf.Ticker(yf_symbol)
+            
+            # Get current data
+            data = ticker.history(period="1d", interval="1m")
+            
+            if not data.empty:
+                latest = data.iloc[-1]
+                return {
+                    'symbol': symbol,
+                    'last_price': float(latest['Close']),
+                    'open': float(latest['Open']),
+                    'high': float(latest['High']),
+                    'low': float(latest['Low']),
+                    'volume': int(latest['Volume']),
+                    'timestamp': data.index[-1].isoformat(),
+                    'source': 'yahoo_finance'
+                }
+            else:
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Error fetching Yahoo Finance tick data: {e}")
+            return {}
+    
+    async def subscribe_to_data(self, symbols: List[str]):
+        """Subscribe to real-time data for symbols (polling)"""
+        logger.info(f"Setting up polling for {len(symbols)} symbols via Yahoo Finance")
+        
+        async def poll_symbols():
+            while True:
+                for symbol in symbols:
+                    try:
+                        tick_data = await self.get_tick_data(symbol)
+                        if tick_data:
+                            logger.debug(f"Polled Yahoo Finance data for {symbol}: {tick_data}")
+                    except Exception as e:
+                        logger.error(f"Error polling Yahoo Finance {symbol}: {e}")
+                    await asyncio.sleep(1)  # Rate limiting
+                await asyncio.sleep(30)  # Poll every 30 seconds
+        
+        # Start polling task
+        asyncio.create_task(poll_symbols())
+    
+    async def check_health(self) -> bool:
+        """Check if Yahoo Finance API is healthy"""
+        try:
+            ticker = yf.Ticker('AAPL')
+            data = ticker.history(period="1d")
+            return not data.empty
+        except:
+            return False
     """
     Data Ingestion Agent
     Responsible for managing multiple data sources and providing clean, validated market data
@@ -167,7 +661,66 @@ class DataAgent:
         self.connected = False
         self.cross_validation_enabled = True
         self.data_store = {}
+        self.monitored_symbols = []
+        self.data_cache = {}
+        self.data_subscribers = []
         
+        # Create data directory if it doesn't exist
+        Path(historical_data_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Initialize SQLite database for data storage
+        self.db_path = os.path.join(historical_data_dir, 'market_data.db')
+        self._init_database()
+        
+    def _init_database(self):
+        """Initialize SQLite database for storing market data"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Create tables for historical data
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS historical_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    timestamp DATETIME NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume INTEGER,
+                    source TEXT,
+                    interval_type TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(symbol, timestamp, interval_type, source)
+                )
+            ''')
+            
+            # Create tables for real-time data
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS realtime_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    timestamp DATETIME NOT NULL,
+                    last_price REAL,
+                    volume INTEGER,
+                    source TEXT,
+                    metadata TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create indexes for better performance
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_symbol_timestamp ON historical_data(symbol, timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_realtime_symbol ON realtime_data(symbol, timestamp)')
+            
+            conn.commit()
+            conn.close()
+            
+            logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+    
     async def initialize_data_sources(self, credentials: Dict):
         """Initialize and connect to all required data sources"""
         for source in self.market_data_sources:
@@ -185,19 +738,151 @@ class DataAgent:
                     data_source = AlphaVantageDataSource(
                         api_key=credentials.get('alpha_vantage_api_key')
                     )
+                elif source.lower() == 'yahoo_finance':
+                    data_source = YFinanceDataSource()
                 else:
                     raise ValueError(f"Unsupported data source: {source}")
                 
                 await data_source.connect()
                 self.data_sources[source.lower()] = data_source
+                logger.info(f"Successfully initialized {source} data source")
+                
             except Exception as e:
                 logger.error(f"Error initializing data source {source}: {str(e)}")
-                # If cross-validation is enabled and a critical data source fails, halt trading
                 if self.cross_validation_enabled:
                     logger.warning(f"Critical data source {source} failed, system may halt trading")
         
         self.connected = len(self.data_sources) > 0
         return self.connected
+    
+    async def store_historical_data(self, symbol: str, data: pd.DataFrame, source: str, interval: str):
+        """Store historical data in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            
+            for timestamp, row in data.iterrows():
+                conn.execute('''
+                    INSERT OR REPLACE INTO historical_data 
+                    (symbol, timestamp, open, high, low, close, volume, source, interval_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    symbol,
+                    timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
+                    float(row.get('open', 0)),
+                    float(row.get('high', 0)),
+                    float(row.get('low', 0)),
+                    float(row.get('close', 0)),
+                    int(row.get('volume', 0)),
+                    source,
+                    interval
+                ))
+            
+            conn.commit()
+            conn.close()
+            logger.debug(f"Stored {len(data)} records for {symbol} from {source}")
+            
+        except Exception as e:
+            logger.error(f"Error storing historical data: {e}")
+    
+    async def store_realtime_data(self, symbol: str, data: Dict, source: str):
+        """Store real-time data in database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            
+            conn.execute('''
+                INSERT INTO realtime_data 
+                (symbol, timestamp, last_price, volume, source, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                symbol,
+                data.get('timestamp', datetime.now().isoformat()),
+                float(data.get('last_price', 0)),
+                int(data.get('volume', 0)),
+                source,
+                json.dumps(data)
+            ))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            logger.error(f"Error storing real-time data: {e}")
+    
+    async def get_stored_historical_data(self, symbol: str, interval: str, limit: int = 1000) -> pd.DataFrame:
+        """Retrieve historical data from database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            
+            query = '''
+                SELECT timestamp, open, high, low, close, volume
+                FROM historical_data
+                WHERE symbol = ? AND interval_type = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            '''
+            
+            df = pd.read_sql_query(query, conn, params=(symbol, interval, limit))
+            conn.close()
+            
+            if not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df.set_index('timestamp', inplace=True)
+                df = df.sort_index()
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error retrieving historical data: {e}")
+            return pd.DataFrame()
+    
+    async def add_symbol_to_monitor(self, symbol: str):
+        """Add a symbol to the monitoring list"""
+        if symbol not in self.monitored_symbols:
+            self.monitored_symbols.append(symbol)
+            logger.info(f"Added {symbol} to monitoring list")
+            
+            for source_name, source in self.data_sources.items():
+                try:
+                    await source.subscribe_to_data([symbol])
+                except Exception as e:
+                    logger.error(f"Error subscribing to {symbol} on {source_name}: {e}")
+    
+    async def remove_symbol_from_monitor(self, symbol: str):
+        """Remove a symbol from the monitoring list"""
+        if symbol in self.monitored_symbols:
+            self.monitored_symbols.remove(symbol)
+            logger.info(f"Removed {symbol} from monitoring list")
+    
+    def subscribe_to_data_updates(self, callback_func):
+        """Subscribe to data updates"""
+        self.data_subscribers.append(callback_func)
+    
+    async def notify_subscribers(self, symbol: str, data: Dict):
+        """Notify all subscribers of new data"""
+        for callback in self.data_subscribers:
+            try:
+                await callback(symbol, data)
+            except Exception as e:
+                logger.error(f"Error notifying subscriber: {e}")
+    
+    async def fetch_and_store_historical_data(self, symbols: List[str], days: int = 365):
+        """Fetch and store historical data for symbols"""
+        for symbol in symbols:
+            logger.info(f"Fetching historical data for {symbol}")
+            
+            for source_name, source in self.data_sources.items():
+                try:
+                    # Fetch data from each source
+                    data = await source.get_historical_data(symbol, '1d', days)
+                    
+                    if not data.empty:
+                        # Store in database
+                        await self.store_historical_data(symbol, data, source_name, '1d')
+                        logger.info(f"Stored {len(data)} historical records for {symbol} from {source_name}")
+                    
+                except Exception as e:
+                    logger.error(f"Error fetching historical data for {symbol} from {source_name}: {e}")
+                    continue
     
     async def get_market_data(self, symbol: str, data_type: str = 'tick') -> Dict:
         """

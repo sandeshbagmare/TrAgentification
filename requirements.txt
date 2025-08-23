@@ -1,7 +1,8 @@
-# Core requirements
-numpy>=1.21.0
-pandas>=1.3.0
-scikit-learn>=1.0.0
+# Core requirements (Windows-compatible versions)
+# Note: Install numpy first with: pip install numpy==1.24.3 --no-cache-dir --force-reinstall
+numpy==1.24.3
+pandas==1.5.3
+scikit-learn==1.3.0
 lightgbm>=3.3.5
 xgboost>=1.5.0
 flask>=2.0.0
@@ -15,17 +16,17 @@ yfinance>=0.2.18
 
 # ML and statistical analysis
 statsmodels>=0.13.0
-tensorflow>=2.9.0
-transformers>=4.18.0
-scipy>=1.9.0
+# tensorflow>=2.9.0  # Optional - can cause conflicts on Windows
+# transformers>=4.18.0  # Optional - large download, install if needed
+scipy==1.11.1
 
 # AI Integrations
 google-generativeai>=0.3.0
 openai>=1.0.0
 azure-identity>=1.12.0
 
-# Data visualization and monitoring
-matplotlib>=3.4.0
+# Data visualization and monitoring (Windows-compatible)
+matplotlib==3.7.1
 streamlit>=1.28.0
 prometheus-client>=0.14.0
 plotly>=5.10.0

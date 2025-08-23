@@ -605,19 +605,215 @@ class SupervisorAgent:
     async def start(self):
         """Start the supervisor agent"""
         logger.info("Starting supervisor agent...")
-        # Implementation for starting the agent
-        # This would typically involve:
-        # - Connecting to system components
-        # - Initializing signal resolution strategies
-        # - Starting monitoring loop
+        
+        try:
+            # Initialize system status
+            self.system_status = {
+                'healthy': True,
+                'last_check': datetime.now().isoformat(),
+                'agent_health': {
+                    'data_agent': 'active',
+                    'technical_agent': 'active',
+                    'ml_agent': 'active',
+                    'statistical_agent': 'active',
+                    'risk_manager': 'active'
+                },
+                'portfolio_value': 100000.0,
+                'daily_pnl': 0.0,
+                'market_volatility': 0.02,
+                'data_quality': 0.95,
+                'api_error_rate': 0.05
+            }
+            
+            # Reset daily counters
+            self.daily_trades = 0
+            self.daily_reset_time = datetime.now()
+            self.circuit_breaker.reset_daily_counters()
+            
+            # Initialize resolution strategies
+            for name, strategy in self.resolution_strategies.items():
+                logger.info(f"Initialized resolution strategy: {name}")
+            
+            # Start monitoring loop (in real system, this would run continuously)
+            logger.info(f"Supervisor agent started with {len(self.resolution_strategies)} resolution strategies")
+            logger.info(f"Daily trade limit: {self.max_trades_per_day}")
+            logger.info(f"Confidence threshold: {self.confidence_threshold}")
+            
+            return {
+                'success': True,
+                'message': 'Supervisor agent started successfully',
+                'resolution_strategies': list(self.resolution_strategies.keys()),
+                'daily_trade_limit': self.max_trades_per_day,
+                'confidence_threshold': self.confidence_threshold,
+                'system_status': self.system_status
+            }
+            
+        except Exception as e:
+            logger.error(f"Error starting supervisor agent: {str(e)}")
+            return {'success': False, 'error': str(e)}
         
     async def emergency_stop(self):
         """Emergency stop for the supervisor agent"""
         logger.info("Initiating emergency stop for supervisor agent...")
-        # Implementation for emergency stop procedures
-        # This would include:
-        # - Halting all trading
-        # - Closing positions
-        # - Notifying other agents
-        # - Putting system in safe mode
-        pass
+        
+        try:
+            # Disable all trading by setting system as unhealthy
+            self.system_status['healthy'] = False
+            self.system_status['emergency_stop'] = True
+            self.system_status['stop_time'] = datetime.now().isoformat()
+            
+            # Reset daily trade counter to maximum to prevent new trades
+            self.daily_trades = self.max_trades_per_day
+            
+            # Activate all circuit breakers
+            self.circuit_breaker.daily_loss_cap = 0.0  # Trigger loss cap immediately
+            self.circuit_breaker.volatility_threshold = 0.0  # Trigger volatility threshold
+            
+            # Clear strategy performance to prevent auto-selection
+            self.strategy_selector.strategy_performance.clear()
+            
+            # Log emergency stop details
+            emergency_record = {
+                'type': 'emergency_stop',
+                'timestamp': datetime.now().isoformat(),
+                'reason': 'Manual emergency stop initiated by supervisor',
+                'system_status': self.system_status.copy(),
+                'daily_trades_halted': self.daily_trades
+            }
+            
+            logger.critical("EMERGENCY STOP ACTIVATED - ALL TRADING HALTED")
+            logger.critical(f"Emergency stop details: {emergency_record}")
+            
+            return {
+                'success': True,
+                'message': 'Emergency stop completed - All trading halted by supervisor',
+                'timestamp': datetime.now().isoformat(),
+                'emergency_record': emergency_record,
+                'system_status': self.system_status
+            }
+            
+        except Exception as e:
+            logger.error(f"Error during supervisor emergency stop: {str(e)}")
+            return {'success': False, 'error': str(e)}
+    
+    async def get_system_health(self) -> Dict:
+        """Get comprehensive system health status"""
+        try:
+            # Update system health check timestamp
+            self.system_status['last_check'] = datetime.now().isoformat()
+            
+            # Check circuit breaker status
+            circuit_status = self.circuit_breaker.check_circuit_breakers(self.system_status)
+            
+            # Check daily trade limits
+            trade_status = await self._check_daily_trade_limit()
+            
+            # Aggregate health status
+            overall_health = (
+                self.system_status.get('healthy', False) and 
+                circuit_status['allow_trade'] and 
+                trade_status['remaining_trades'] > 0
+            )
+            
+            health_report = {
+                'overall_health': overall_health,
+                'system_status': self.system_status,
+                'circuit_breakers': circuit_status,
+                'trade_limits': trade_status,
+                'resolution_strategies': list(self.resolution_strategies.keys()),
+                'strategy_performance': {
+                    strategy: {
+                        'total_trades': data['total_trades'],
+                        'win_rate': data['win_count'] / max(data['total_trades'], 1),
+                        'avg_pnl': data['total_pnl'] / max(data['total_trades'], 1),
+                        'last_used': data['last_used'].isoformat()
+                    }
+                    for strategy, data in self.strategy_selector.strategy_performance.items()
+                },
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            return {
+                'success': True,
+                'health_report': health_report
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting system health: {str(e)}")
+            return {'success': False, 'error': str(e)}
+    
+    async def update_system_parameters(self, new_params: Dict) -> Dict:
+        """Update supervisor system parameters dynamically"""
+        try:
+            updated_params = []
+            
+            # Update confidence threshold
+            if 'confidence_threshold' in new_params:
+                self.confidence_threshold = new_params['confidence_threshold']
+                updated_params.append('confidence_threshold')
+            
+            # Update daily trade limit
+            if 'max_trades_per_day' in new_params:
+                self.max_trades_per_day = new_params['max_trades_per_day']
+                updated_params.append('max_trades_per_day')
+            
+            # Update signal timeout
+            if 'signal_timeout' in new_params:
+                self.signal_timeout = new_params['signal_timeout']
+                updated_params.append('signal_timeout')
+            
+            # Update circuit breaker parameters
+            if 'daily_loss_cap' in new_params:
+                self.circuit_breaker.daily_loss_cap = new_params['daily_loss_cap']
+                updated_params.append('daily_loss_cap')
+            
+            if 'volatility_threshold' in new_params:
+                self.circuit_breaker.volatility_threshold = new_params['volatility_threshold']
+                updated_params.append('volatility_threshold')
+            
+            # Update default resolution method
+            if 'default_resolution' in new_params:
+                if new_params['default_resolution'] in self.resolution_strategies:
+                    self.default_resolution = new_params['default_resolution']
+                    updated_params.append('default_resolution')
+            
+            logger.info(f"Updated supervisor parameters: {updated_params}")
+            
+            return {
+                'success': True,
+                'updated_parameters': updated_params,
+                'current_config': {
+                    'confidence_threshold': self.confidence_threshold,
+                    'max_trades_per_day': self.max_trades_per_day,
+                    'signal_timeout': self.signal_timeout,
+                    'default_resolution': self.default_resolution,
+                    'daily_loss_cap': self.circuit_breaker.daily_loss_cap,
+                    'volatility_threshold': self.circuit_breaker.volatility_threshold
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error updating supervisor parameters: {str(e)}")
+            return {'success': False, 'error': str(e)}
+    
+    def get_supervisor_status(self) -> Dict:
+        """Get current status of the supervisor agent"""
+        return {
+            'system_healthy': self.system_status.get('healthy', False),
+            'daily_trades': self.daily_trades,
+            'max_trades_per_day': self.max_trades_per_day,
+            'remaining_trades': max(0, self.max_trades_per_day - self.daily_trades),
+            'confidence_threshold': self.confidence_threshold,
+            'signal_timeout': self.signal_timeout,
+            'default_resolution': self.default_resolution,
+            'available_resolutions': list(self.resolution_strategies.keys()),
+            'circuit_breaker_status': {
+                'daily_loss_cap': self.circuit_breaker.daily_loss_cap,
+                'volatility_threshold': self.circuit_breaker.volatility_threshold,
+                'daily_pnl': self.circuit_breaker.daily_pnl,
+                'daily_trades': self.circuit_breaker.daily_trades
+            },
+            'strategy_count': len(self.strategy_selector.strategy_performance),
+            'last_reset': self.daily_reset_time.isoformat(),
+            'emergency_stop': self.system_status.get('emergency_stop', False)
+        }

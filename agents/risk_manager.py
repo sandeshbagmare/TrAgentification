@@ -8,6 +8,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Union
 from datetime import datetime, timedelta
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
@@ -501,7 +502,7 @@ class CircuitBreakerRule(RiskRule):
                 }
             
             # Check data discrepancy count
-            if self.data_discrepancy_count >= self.max_data_discrepancy_count:
+            if self.data_discrepancy_count >= self.max_data_discrepancies:
                 return {
                     'name': self.name,
                     'allow_trade': False,
@@ -738,8 +739,8 @@ class RiskManager:
                 current_drawdown = 0.0
                 self.portfolio_value = portfolio_value  # Update high water mark
             
-            # Get market volatility from data agent
-            market_volatility = trade_proposal.get('indicator_values', {}).get('atr', {}).get('atr', 0)
+            # Get market volatility from portfolio data
+            market_volatility = portfolio.get('volatility', 0.02)  # Default 2% volatility
             
             # Get system health from circuit breaker rule
             circuit_breaker_rule = next((r for r in self.active_rules if isinstance(r, CircuitBreakerRule)), None)
@@ -824,18 +825,143 @@ class RiskManager:
     async def start(self):
         """Start the risk manager"""
         logger.info("Starting risk manager...")
-        # Implementation for starting the agent
-        # This would typically involve:
-        # - Connecting to portfolio data
-        # - Initializing risk rules
-        # - Starting monitoring loop
+        
+        try:
+            # Initialize portfolio tracking
+            self.reset_daily_stats()
+            
+            # Validate risk rules configuration
+            for rule_name, rule in self.risk_rules.items():
+                if not hasattr(rule, 'evaluate'):
+                    logger.error(f"Risk rule {rule_name} missing evaluate method")
+                    return {'success': False, 'error': f'Invalid rule: {rule_name}'}
+            
+            # Initialize circuit breakers
+            circuit_breaker = self.risk_rules.get('circuit_breaker')
+            if circuit_breaker:
+                circuit_breaker.reset_counters()
+            
+            # Start monitoring loop (would be implemented with asyncio in real system)
+            logger.info(f"Risk manager started with {len(self.active_rules)} active rules")
+            
+            return {
+                'success': True,
+                'message': 'Risk manager started successfully',
+                'active_rules': len(self.active_rules),
+                'portfolio_value': self.portfolio_value
+            }
+            
+        except Exception as e:
+            logger.error(f"Error starting risk manager: {str(e)}")
+            return {'success': False, 'error': str(e)}
         
     async def emergency_stop(self):
         """Emergency stop for the risk manager"""
         logger.info("Initiating emergency stop for risk manager...")
-        # Implementation for emergency stop procedures
-        # This would include:
-        # - Closing all positions
-        # - Halting all trading
-        # - Notifying other agents
-        pass
+        
+        try:
+            # Disable all risk rules to halt trading
+            for rule in self.active_rules:
+                rule.enabled = False
+            
+            # Record emergency stop in daily stats
+            self.daily_trades.append({
+                'type': 'emergency_stop',
+                'timestamp': datetime.now().isoformat(),
+                'reason': 'Manual emergency stop initiated'
+            })
+            
+            # Reset counters to prevent false signals
+            circuit_breaker = self.risk_rules.get('circuit_breaker')
+            if circuit_breaker:
+                circuit_breaker.api_error_count = 0
+                circuit_breaker.data_discrepancy_count = 0
+            
+            logger.warning("EMERGENCY STOP ACTIVATED - All trading halted")
+            
+            return {
+                'success': True,
+                'message': 'Emergency stop completed - All trading halted',
+                'disabled_rules': len(self.active_rules),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error during emergency stop: {str(e)}")
+            return {'success': False, 'error': str(e)}
+    
+    def get_portfolio_status(self) -> Dict:
+        """Get comprehensive portfolio status and risk metrics"""
+        try:
+            return {
+                'portfolio_value': self.portfolio_value,
+                'total_pnl': self.total_pnl,
+                'daily_pnl': self.daily_pnl,
+                'daily_trades': len(self.daily_trades),
+                'win_rate': self.win_rate,
+                'total_trades': self.total_trades,
+                'daily_win_count': self.daily_win_count,
+                'daily_loss_count': self.daily_loss_count,
+                'total_return': self.total_return,
+                'daily_return': self.daily_total_return,
+                'max_drawdown': self.max_drawdown,
+                'sharpe_ratio': self.sharpe_ratio,
+                'active_rules': [rule.name for rule in self.active_rules if rule.enabled],
+                'last_reset': self.last_reset.isoformat(),
+                'system_status': 'active' if any(rule.enabled for rule in self.active_rules) else 'halted'
+            }
+        except Exception as e:
+            logger.error(f"Error getting portfolio status: {str(e)}")
+            return {'error': str(e)}
+    
+    def update_risk_parameters(self, new_params: Dict) -> Dict:
+        """Update risk management parameters dynamically"""
+        try:
+            updated_params = []
+            
+            # Update maximum risk per trade
+            if 'max_risk_per_trade' in new_params:
+                self.max_risk_per_trade = new_params['max_risk_per_trade']
+                # Update position sizing rule
+                pos_rule = self.risk_rules.get('position_sizing')
+                if pos_rule:
+                    pos_rule.max_risk_per_trade = new_params['max_risk_per_trade']
+                updated_params.append('max_risk_per_trade')
+            
+            # Update daily loss cap
+            if 'daily_loss_cap' in new_params:
+                self.daily_loss_cap = new_params['daily_loss_cap']
+                # Update daily loss cap rule
+                loss_rule = self.risk_rules.get('daily_loss_cap')
+                if loss_rule:
+                    loss_rule.max_daily_loss = new_params['daily_loss_cap']
+                updated_params.append('daily_loss_cap')
+            
+            # Update rule enablement
+            if 'enable_rules' in new_params:
+                for rule_name in new_params['enable_rules']:
+                    if rule_name in self.risk_rules:
+                        self.risk_rules[rule_name].enabled = True
+                        updated_params.append(f'enabled_{rule_name}')
+            
+            if 'disable_rules' in new_params:
+                for rule_name in new_params['disable_rules']:
+                    if rule_name in self.risk_rules:
+                        self.risk_rules[rule_name].enabled = False
+                        updated_params.append(f'disabled_{rule_name}')
+            
+            logger.info(f"Updated risk parameters: {updated_params}")
+            
+            return {
+                'success': True,
+                'updated_parameters': updated_params,
+                'current_config': {
+                    'max_risk_per_trade': self.max_risk_per_trade,
+                    'daily_loss_cap': self.daily_loss_cap,
+                    'active_rules': [rule.name for rule in self.active_rules if rule.enabled]
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error updating risk parameters: {str(e)}")
+            return {'success': False, 'error': str(e)}

@@ -221,6 +221,233 @@ class ATR(TechnicalIndicator):
         else:
             return {"signal": 0, "message": "Volatility stable"}
 
+class Stochastic(TechnicalIndicator):
+    """Stochastic Oscillator indicator implementation"""
+    
+    def __init__(self, k_period: int = 14, d_period: int = 3, smooth: int = 3):
+        self.k_period = k_period
+        self.d_period = d_period
+        self.smooth = smooth
+    
+    def calculate(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Calculate Stochastic Oscillator"""
+        result = data.copy()
+        
+        # Calculate %K
+        low_min = result['low'].rolling(window=self.k_period).min()
+        high_max = result['high'].rolling(window=self.k_period).max()
+        result['stoch_k'] = 100 * (result['close'] - low_min) / (high_max - low_min)
+        
+        # Smooth %K if needed
+        if self.smooth > 1:
+            result['stoch_k'] = result['stoch_k'].rolling(window=self.smooth).mean()
+        
+        # Calculate %D (moving average of %K)
+        result['stoch_d'] = result['stoch_k'].rolling(window=self.d_period).mean()
+        
+        return result
+    
+    def generate_signal(self, data: pd.DataFrame) -> Dict:
+        """Generate signal based on Stochastic levels and crossovers"""
+        if len(data) < self.k_period:
+            return {"signal": 0, "message": "Not enough data"}
+        
+        latest = data.iloc[-1]
+        previous = data.iloc[-2]
+        
+        # Oversold condition (buy signal)
+        if latest['stoch_k'] < 20 and latest['stoch_d'] < 20:
+            if previous['stoch_k'] <= previous['stoch_d'] and latest['stoch_k'] > latest['stoch_d']:
+                return {"signal": 1, "message": "Stochastic bullish crossover in oversold region"}
+        
+        # Overbought condition (sell signal)
+        elif latest['stoch_k'] > 80 and latest['stoch_d'] > 80:
+            if previous['stoch_k'] >= previous['stoch_d'] and latest['stoch_k'] < latest['stoch_d']:
+                return {"signal": -1, "message": "Stochastic bearish crossover in overbought region"}
+        
+        return {"signal": 0, "message": "No stochastic signal"}
+
+class WilliamsR(TechnicalIndicator):
+    """Williams %R indicator implementation"""
+    
+    def __init__(self, period: int = 14):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Calculate Williams %R"""
+        result = data.copy()
+        
+        # Calculate highest high and lowest low over period
+        high_max = result['high'].rolling(window=self.period).max()
+        low_min = result['low'].rolling(window=self.period).min()
+        
+        # Calculate Williams %R
+        result['williams_r'] = -100 * (high_max - result['close']) / (high_max - low_min)
+        
+        return result
+    
+    def generate_signal(self, data: pd.DataFrame) -> Dict:
+        """Generate signal based on Williams %R levels"""
+        if len(data) < self.period:
+            return {"signal": 0, "message": "Not enough data"}
+        
+        latest = data.iloc[-1]
+        
+        # Oversold (buy signal)
+        if latest['williams_r'] <= -80:
+            return {"signal": 1, "message": "Williams %R oversold"}
+        # Overbought (sell signal)
+        elif latest['williams_r'] >= -20:
+            return {"signal": -1, "message": "Williams %R overbought"}
+        # Neutral
+        else:
+            return {"signal": 0, "message": "Williams %R neutral"}
+
+class CCI(TechnicalIndicator):
+    """Commodity Channel Index (CCI) indicator implementation"""
+    
+    def __init__(self, period: int = 20):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Calculate CCI"""
+        result = data.copy()
+        
+        # Calculate Typical Price
+        result['tp'] = (result['high'] + result['low'] + result['close']) / 3
+        
+        # Calculate Simple Moving Average of Typical Price
+        result['tp_sma'] = result['tp'].rolling(window=self.period).mean()
+        
+        # Calculate Mean Deviation
+        result['mean_dev'] = result['tp'].rolling(window=self.period).apply(
+            lambda x: np.mean(np.abs(x - x.mean()))
+        )
+        
+        # Calculate CCI
+        result['cci'] = (result['tp'] - result['tp_sma']) / (0.015 * result['mean_dev'])
+        
+        return result
+    
+    def generate_signal(self, data: pd.DataFrame) -> Dict:
+        """Generate signal based on CCI levels"""
+        if len(data) < self.period:
+            return {"signal": 0, "message": "Not enough data"}
+        
+        latest = data.iloc[-1]
+        previous = data.iloc[-2]
+        
+        # Oversold turning up (buy signal)
+        if previous['cci'] <= -100 and latest['cci'] > -100:
+            return {"signal": 1, "message": "CCI emerging from oversold"}
+        # Overbought turning down (sell signal)
+        elif previous['cci'] >= 100 and latest['cci'] < 100:
+            return {"signal": -1, "message": "CCI emerging from overbought"}
+        # Neutral
+        else:
+            return {"signal": 0, "message": "CCI neutral"}
+
+class VWAP(TechnicalIndicator):
+    """Volume Weighted Average Price (VWAP) indicator implementation"""
+    
+    def __init__(self, period: int = 20):
+        self.period = period
+    
+    def calculate(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Calculate VWAP"""
+        result = data.copy()
+        
+        # Calculate typical price
+        result['typical_price'] = (result['high'] + result['low'] + result['close']) / 3
+        
+        # Calculate volume * typical price
+        result['vp'] = result['typical_price'] * result['volume']
+        
+        # Calculate VWAP
+        result['vwap'] = result['vp'].rolling(window=self.period).sum() / result['volume'].rolling(window=self.period).sum()
+        
+        return result
+    
+    def generate_signal(self, data: pd.DataFrame) -> Dict:
+        """Generate signal based on price vs VWAP"""
+        if len(data) < self.period:
+            return {"signal": 0, "message": "Not enough data"}
+        
+        latest = data.iloc[-1]
+        previous = data.iloc[-2]
+        
+        # Price crossing above VWAP (buy signal)
+        if previous['close'] <= previous['vwap'] and latest['close'] > latest['vwap']:
+            return {"signal": 1, "message": "Price crossing above VWAP"}
+        # Price crossing below VWAP (sell signal)
+        elif previous['close'] >= previous['vwap'] and latest['close'] < latest['vwap']:
+            return {"signal": -1, "message": "Price crossing below VWAP"}
+        # No crossover
+        else:
+            return {"signal": 0, "message": "No VWAP crossover"}
+
+class Ichimoku(TechnicalIndicator):
+    """Ichimoku Kinko Hyo indicator implementation"""
+    
+    def __init__(self, conversion_period: int = 9, base_period: int = 26, span_b_period: int = 52, displacement: int = 26):
+        self.conversion_period = conversion_period
+        self.base_period = base_period
+        self.span_b_period = span_b_period
+        self.displacement = displacement
+    
+    def calculate(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Calculate Ichimoku components"""
+        result = data.copy()
+        
+        # Tenkan-sen (Conversion Line)
+        period_9_high = result['high'].rolling(window=self.conversion_period).max()
+        period_9_low = result['low'].rolling(window=self.conversion_period).min()
+        result['tenkan_sen'] = (period_9_high + period_9_low) / 2
+        
+        # Kijun-sen (Base Line)
+        period_26_high = result['high'].rolling(window=self.base_period).max()
+        period_26_low = result['low'].rolling(window=self.base_period).min()
+        result['kijun_sen'] = (period_26_high + period_26_low) / 2
+        
+        # Senkou Span A (Leading Span A)
+        result['senkou_span_a'] = ((result['tenkan_sen'] + result['kijun_sen']) / 2).shift(self.displacement)
+        
+        # Senkou Span B (Leading Span B)
+        period_52_high = result['high'].rolling(window=self.span_b_period).max()
+        period_52_low = result['low'].rolling(window=self.span_b_period).min()
+        result['senkou_span_b'] = ((period_52_high + period_52_low) / 2).shift(self.displacement)
+        
+        # Chikou Span (Lagging Span)
+        result['chikou_span'] = result['close'].shift(-self.displacement)
+        
+        return result
+    
+    def generate_signal(self, data: pd.DataFrame) -> Dict:
+        """Generate signal based on Ichimoku cloud analysis"""
+        if len(data) < self.span_b_period:
+            return {"signal": 0, "message": "Not enough data"}
+        
+        latest = data.iloc[-1]
+        previous = data.iloc[-2]
+        
+        # Check if price is above or below cloud
+        cloud_top = max(latest['senkou_span_a'], latest['senkou_span_b'])
+        cloud_bottom = min(latest['senkou_span_a'], latest['senkou_span_b'])
+        
+        # Bullish signal: Tenkan above Kijun and price above cloud
+        if (latest['tenkan_sen'] > latest['kijun_sen'] and 
+            latest['close'] > cloud_top and 
+            previous['tenkan_sen'] <= previous['kijun_sen']):
+            return {"signal": 1, "message": "Ichimoku bullish signal"}
+        
+        # Bearish signal: Tenkan below Kijun and price below cloud
+        elif (latest['tenkan_sen'] < latest['kijun_sen'] and 
+              latest['close'] < cloud_bottom and 
+              previous['tenkan_sen'] >= previous['kijun_sen']):
+            return {"signal": -1, "message": "Ichimoku bearish signal"}
+        
+        return {"signal": 0, "message": "No clear Ichimoku signal"}
+
 class TechnicalAnalysisAgent:
     """
     Technical Analysis Agent
@@ -234,10 +461,15 @@ class TechnicalAnalysisAgent:
             'rsi': RSI,
             'macd': MACD,
             'bollinger': BollingerBands,
-            'atr': ATR
+            'atr': ATR,
+            'stochastic': Stochastic,
+            'williams_r': WilliamsR,
+            'cci': CCI,
+            'vwap': VWAP,
+            'ichimoku': Ichimoku
         }
         self.active_indicators = {}
-        self.signal_threshold = 0.7  # 70% of indicators need to agree for a signal
+        self.signal_threshold = 0.6  # 60% of indicators need to agree for a signal
         
         # Initialize indicators
         self._initialize_indicators()

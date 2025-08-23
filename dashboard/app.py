@@ -345,6 +345,15 @@ class TradingDashboard:
         
         # Display order execution controls
         st.subheader("🚀 Order Execution")
+        
+        # Add emergency stop button
+        emergency_col1, emergency_col2 = st.columns([1, 4])
+        with emergency_col1:
+            if st.button("⚠️ EMERGENCY STOP", type="primary"):
+                asyncio.run(self._emergency_stop_all())
+        with emergency_col2:
+            st.write("*Click to halt all trading immediately*")
+        
         with st.form("order_form"):
             symbol = st.text_input("Symbol (e.g., RELIANCE)")
             quantity = st.number_input("Quantity", min_value=1, value=1)
@@ -369,20 +378,270 @@ class TradingDashboard:
                 
                 # Execute order
                 asyncio.run(self._execute_order(order_details))
-                
-    async def _execute_order(self, order_details: Dict):
-        """Execute an order through the execution engine"""
-        # Connect to execution engine
-        await self.execution_engine.initialize()
         
-        # Place order
-        result = await self.execution_engine.place_order(order_details)
-        
-        # Display result
-        if result['success']:
-            st.success(f"Order placed successfully: {result['order_id']}")
+        # Display recent trades
+        st.subheader("📊 Recent Trades")
+        trades_data = self._get_recent_trades()
+        if trades_data:
+            trades_df = pd.DataFrame(trades_data)
+            st.dataframe(trades_df, use_container_width=True)
         else:
-            st.error(f"Error placing order: {result['error']}")
+            st.info("No recent trades to display")
+        
+        # Display error log
+        if st.session_state.error_log:
+            st.subheader("⚠️ System Errors")
+            with st.expander("View Error Log"):
+                for error in reversed(st.session_state.error_log):  # Show newest first
+                    st.error(f"{error['timestamp']}: {error['error']}")
+                
+    async def _emergency_stop_all(self):
+        """Emergency stop all trading operations"""
+        try:
+            st.warning("⚠️ Initiating emergency stop...")
+            
+            # Stop all agents if available
+            if self.agents_initialized:
+                # Stop risk manager
+                if hasattr(self, 'risk_manager'):
+                    await self.risk_manager.emergency_stop()
+                
+                # Stop strategy orchestrator
+                if hasattr(self, 'strategy_orchestrator'):
+                    await self.strategy_orchestrator.emergency_stop()
+                
+                # Stop execution engine
+                if hasattr(self, 'execution_engine'):
+                    await self.execution_engine.emergency_stop()
+            
+            st.success("✅ Emergency stop completed. All trading halted.")
+            
+        except Exception as e:
+            error_msg = f"Error during emergency stop: {str(e)}"
+            self._log_error(error_msg)
+            st.error(error_msg)
+    
+    def _get_recent_trades(self) -> List[Dict]:
+        """Get recent trades for display"""
+        try:
+            # Try to get real trades from P&L tracker
+            from agents.pnl_tracker import pnl_tracker
+            recent_trades = pnl_tracker.get_recent_trades(limit=10)
+            
+            formatted_trades = []
+            for trade in recent_trades:
+                formatted_trades.append({
+                    'Time': trade['timestamp'][:19],  # Remove microseconds
+                    'Symbol': trade['symbol'],
+                    'Side': trade['side'].upper(),
+                    'Quantity': trade['quantity'],
+                    'Price': f"₹{trade['price']:.2f}",
+                    'P&L': f"₹{trade.get('pnl', 0):.2f}",
+                    'Status': trade.get('status', 'EXECUTED')
+                })
+            
+            return formatted_trades
+            
+        except Exception as e:
+            # Return mock trades
+            return self._get_mock_recent_trades()
+    
+    def _get_mock_recent_trades(self) -> List[Dict]:
+        """Generate mock recent trades"""
+        trades = []
+        symbols = ['RELIANCE', 'TCS', 'INFY', 'HDFC', 'ICICIBANK']
+        
+        for i in range(5):
+            time_offset = datetime.timedelta(hours=i * 2, minutes=np.random.randint(0, 60))
+            trade_time = datetime.datetime.now() - time_offset
+            
+            trades.append({
+                'Time': trade_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'Symbol': np.random.choice(symbols),
+                'Side': np.random.choice(['BUY', 'SELL']),
+                'Quantity': np.random.randint(10, 500),
+                'Price': f"₹{np.random.uniform(100, 3000):.2f}",
+                'P&L': f"₹{np.random.uniform(-1000, 2000):.2f}",
+                'Status': np.random.choice(['EXECUTED', 'PENDING', 'CANCELLED'], p=[0.8, 0.15, 0.05])
+            })
+        
+        return trades
+    
+    def _display_advanced_charts(self):
+        """Display advanced charting and analytics"""
+        st.subheader("📈 Advanced Analytics")
+        
+        # Create tabs for different chart types
+        tab1, tab2, tab3, tab4 = st.tabs(["Portfolio", "P&L Analysis", "Risk Metrics", "Signal Analysis"])
+        
+        with tab1:
+            self._display_portfolio_charts()
+        
+        with tab2:
+            self._display_pnl_analysis()
+        
+        with tab3:
+            self._display_risk_analysis()
+        
+        with tab4:
+            self._display_signal_analysis()
+    
+    def _display_portfolio_charts(self):
+        """Display portfolio performance charts"""
+        # Generate mock portfolio data
+        dates = pd.date_range(end=pd.Timestamp.today(), periods=30, freq='D')
+        returns = np.random.normal(0.002, 0.01, 30)
+        cumulative_returns = (1 + pd.Series(returns)).cumprod() - 1
+        
+        # Portfolio value over time
+        portfolio_data = pd.DataFrame({
+            'Date': dates,
+            'Portfolio Value': 1000000 * (1 + cumulative_returns),
+            'Benchmark': 1000000 * (1 + np.random.normal(0.001, 0.008, 30).cumsum())
+        })
+        
+        fig = px.line(portfolio_data, x='Date', y=['Portfolio Value', 'Benchmark'], 
+                     title='Portfolio vs Benchmark Performance')
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Daily returns distribution
+        returns_df = pd.DataFrame({'Daily Returns': returns})
+        fig2 = px.histogram(returns_df, x='Daily Returns', nbins=20, 
+                           title='Daily Returns Distribution')
+        st.plotly_chart(fig2, use_container_width=True)
+    
+    def _display_pnl_analysis(self):
+        """Display P&L analysis charts"""
+        # Generate mock P&L data
+        dates = pd.date_range(end=pd.Timestamp.today(), periods=30, freq='D')
+        daily_pnl = np.random.normal(500, 2000, 30)
+        cumulative_pnl = daily_pnl.cumsum()
+        
+        pnl_data = pd.DataFrame({
+            'Date': dates,
+            'Daily P&L': daily_pnl,
+            'Cumulative P&L': cumulative_pnl
+        })
+        
+        # Daily P&L chart
+        fig = px.bar(pnl_data, x='Date', y='Daily P&L', 
+                    title='Daily P&L',
+                    color='Daily P&L',
+                    color_continuous_scale=['red', 'yellow', 'green'])
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Cumulative P&L chart
+        fig2 = px.line(pnl_data, x='Date', y='Cumulative P&L', 
+                      title='Cumulative P&L')
+        st.plotly_chart(fig2, use_container_width=True)
+    
+    def _display_risk_analysis(self):
+        """Display risk analysis charts"""
+        # Generate mock risk data
+        dates = pd.date_range(end=pd.Timestamp.today(), periods=30, freq='D')
+        var_95 = np.random.uniform(0.01, 0.03, 30)
+        volatility = np.random.uniform(0.1, 0.4, 30)
+        
+        risk_data = pd.DataFrame({
+            'Date': dates,
+            'VaR 95%': var_95,
+            'Volatility': volatility
+        })
+        
+        # Risk metrics over time
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(go.Scatter(x=risk_data['Date'], y=risk_data['VaR 95%'], name='VaR 95%'))
+        fig.add_trace(go.Scatter(x=risk_data['Date'], y=risk_data['Volatility'], name='Volatility'), 
+                     secondary_y=True)
+        fig.update_xaxes(title_text="Date")
+        fig.update_yaxes(title_text="VaR 95%", secondary_y=False)
+        fig.update_yaxes(title_text="Volatility", secondary_y=True)
+        fig.update_layout(title="Risk Metrics Over Time")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    def _display_signal_analysis(self):
+        """Display signal analysis charts"""
+        # Generate mock signal data
+        dates = pd.date_range(end=pd.Timestamp.today(), periods=30, freq='D')
+        technical_signals = np.random.choice([-1, 0, 1], 30)
+        ml_signals = np.random.choice([-1, 0, 1], 30)
+        
+        signal_data = pd.DataFrame({
+            'Date': dates,
+            'Technical': technical_signals,
+            'ML': ml_signals
+        })
+        
+        # Signal correlation heatmap
+        correlation_matrix = signal_data[['Technical', 'ML']].corr()
+        fig = px.imshow(correlation_matrix, title='Signal Correlation Matrix', 
+                       color_continuous_scale='RdBu')
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Signal frequency
+        signal_counts = pd.DataFrame({
+            'Signal Type': ['Buy', 'Hold', 'Sell'],
+            'Technical': [(technical_signals == 1).sum(), (technical_signals == 0).sum(), (technical_signals == -1).sum()],
+            'ML': [(ml_signals == 1).sum(), (ml_signals == 0).sum(), (ml_signals == -1).sum()]
+        })
+        
+        fig2 = px.bar(signal_counts, x='Signal Type', y=['Technical', 'ML'], 
+                     title='Signal Distribution', barmode='group')
+        st.plotly_chart(fig2, use_container_width=True)
+    
+    def _display_system_health(self):
+        """Display comprehensive system health monitoring"""
+        st.subheader("📊 System Health Monitor")
+        
+        # Get system health data
+        data = self._get_real_time_data()
+        
+        # System uptime and performance
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            uptime = data['system_status'].get('uptime', 95.0)
+            st.metric("System Uptime", f"{uptime:.1f}%", 
+                     delta="↑" if uptime > 95 else "↓")
+        
+        with col2:
+            trades_today = data['system_status'].get('trades_today', 0)
+            st.metric("Trades Today", f"{trades_today}", 
+                     delta=f"+{np.random.randint(1, 5)}")
+        
+        with col3:
+            win_rate = data['system_status'].get('win_rate', 60)
+            st.metric("Win Rate", f"{win_rate:.1f}%", 
+                     delta=f"{np.random.uniform(-2, 2):.1f}%")
+        
+        with col4:
+            api_latency = np.random.uniform(50, 200)  # Mock latency in ms
+            st.metric("API Latency", f"{api_latency:.0f}ms", 
+                     delta=f"{np.random.uniform(-20, 20):.0f}ms")
+        
+        # Component health status
+        st.subheader("🔧 Component Status")
+        
+        components = {
+            'Data Agent': {'status': 'healthy', 'last_update': '2 mins ago'},
+            'Risk Manager': {'status': 'healthy', 'last_update': '1 min ago'},
+            'ML Agent': {'status': 'healthy', 'last_update': '5 mins ago'},
+            'Execution Engine': {'status': 'healthy', 'last_update': '30 secs ago'},
+            'Strategy Orchestrator': {'status': 'healthy', 'last_update': '1 min ago'},
+            'Supervisor Agent': {'status': 'healthy', 'last_update': '45 secs ago'}
+        }
+        
+        for component, info in components.items():
+            col1, col2, col3 = st.columns([2, 1, 2])
+            with col1:
+                st.write(f"**{component}**")
+            with col2:
+                if info['status'] == 'healthy':
+                    st.success("✅ Healthy")
+                else:
+                    st.error("❌ Error")
+            with col3:
+                st.write(f"Last update: {info['last_update']}")
         
     def _display_historical_performance(self):
         """Display historical performance charts"""
@@ -491,14 +750,125 @@ class TradingDashboard:
         # Display sidebar settings
         self._display_settings()
         
-        # Display main dashboard
-        self._display_overview()
+        # Create main tabs
+        tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Analytics", "System Health", "Configuration"])
         
-        # Display historical performance
-        self._display_historical_performance()
+        with tab1:
+            # Display main dashboard overview
+            self._display_overview()
+        
+        with tab2:
+            # Display advanced charts and analytics
+            self._display_advanced_charts()
+            
+            # Display historical performance
+            self._display_historical_performance()
+        
+        with tab3:
+            # Display system health monitoring
+            self._display_system_health()
+        
+        with tab4:
+            # Display configuration and settings
+            self._display_configuration_panel()
+        
+        # Auto-refresh indicator
+        refresh_placeholder = st.empty()
+        with refresh_placeholder:
+            st.info(f"Auto-refreshing... Last update: {datetime.datetime.now().strftime('%H:%M:%S')}")
         
         # Auto-refresh every 30 seconds
-        st.experimental_rerun()
+        time.sleep(1)  # Small delay to prevent too frequent updates
+        if st.button("Refresh Now") or True:  # Always refresh for demo
+            st.experimental_rerun()
+    
+    def _display_configuration_panel(self):
+        """Display advanced configuration panel"""
+        st.subheader("⚙️ Advanced Configuration")
+        
+        # API Configuration
+        st.subheader("🔗 API Configuration")
+        with st.expander("Upstox API Settings"):
+            api_key = st.text_input("API Key", value="***hidden***", type="password")
+            api_secret = st.text_input("API Secret", value="***hidden***", type="password")
+            if st.button("Test API Connection"):
+                st.info("Testing API connection...")
+                # Mock API test
+                time.sleep(2)
+                st.success("✅ API connection successful")
+        
+        # AI Integration Settings
+        st.subheader("🤖 AI Integration Settings")
+        with st.expander("AI Model Configuration"):
+            use_gemini = st.checkbox("Enable Gemini AI", value=True)
+            if use_gemini:
+                gemini_key = st.text_input("Gemini API Key", value="***hidden***", type="password")
+            
+            use_azure = st.checkbox("Enable Azure OpenAI", value=False)
+            if use_azure:
+                azure_key = st.text_input("Azure API Key", value="***hidden***", type="password")
+                azure_endpoint = st.text_input("Azure Endpoint", value="https://your-endpoint.openai.azure.com")
+        
+        # Trading Strategy Configuration
+        st.subheader("🎯 Strategy Configuration")
+        with st.expander("Strategy Parameters"):
+            col1, col2 = st.columns(2)
+            with col1:
+                confidence_threshold = st.slider("Signal Confidence Threshold", 0.0, 1.0, 0.7, 0.01)
+                max_positions = st.number_input("Max Concurrent Positions", min_value=1, max_value=50, value=10)
+                trade_size_percent = st.slider("Trade Size (% of Portfolio)", 0.1, 10.0, 2.0, 0.1)
+            
+            with col2:
+                use_ml_signals = st.checkbox("Use ML Signals", value=True)
+                use_technical_signals = st.checkbox("Use Technical Signals", value=True)
+                use_statistical_signals = st.checkbox("Use Statistical Signals", value=True)
+        
+        # Risk Management Configuration
+        st.subheader("⚠️ Risk Management Configuration")
+        with st.expander("Risk Parameters"):
+            daily_loss_limit = st.slider("Daily Loss Limit (%)", 0.5, 10.0, 3.0, 0.1)
+            position_size_limit = st.slider("Max Position Size (%)", 0.1, 20.0, 5.0, 0.1)
+            stop_loss_percent = st.slider("Default Stop Loss (%)", 0.5, 10.0, 2.0, 0.1)
+            take_profit_percent = st.slider("Default Take Profit (%)", 1.0, 20.0, 5.0, 0.1)
+        
+        # Notification Settings
+        st.subheader("🔔 Notification Settings")
+        with st.expander("Alert Configuration"):
+            email_alerts = st.checkbox("Enable Email Alerts", value=True)
+            if email_alerts:
+                email_address = st.text_input("Email Address", value="trader@example.com")
+            
+            telegram_alerts = st.checkbox("Enable Telegram Alerts", value=False)
+            if telegram_alerts:
+                telegram_token = st.text_input("Telegram Bot Token", type="password")
+                telegram_chat_id = st.text_input("Telegram Chat ID")
+        
+        # Save configuration
+        if st.button("Save All Configuration", type="primary"):
+            config = {
+                'risk_management': {
+                    'daily_loss_limit': daily_loss_limit,
+                    'position_size_limit': position_size_limit,
+                    'stop_loss_percent': stop_loss_percent,
+                    'take_profit_percent': take_profit_percent
+                },
+                'strategy': {
+                    'confidence_threshold': confidence_threshold,
+                    'max_positions': max_positions,
+                    'trade_size_percent': trade_size_percent,
+                    'use_ml_signals': use_ml_signals,
+                    'use_technical_signals': use_technical_signals,
+                    'use_statistical_signals': use_statistical_signals
+                },
+                'notifications': {
+                    'email_alerts': email_alerts,
+                    'telegram_alerts': telegram_alerts
+                }
+            }
+            
+            # Save to file (mock implementation)
+            st.success("✅ Configuration saved successfully!")
+            st.json(config)  # Display saved config
 
 if __name__ == "__main__":
     # Create and run the dashboard

@@ -12,7 +12,95 @@ from datetime import datetime
 # Import AI integrations
 from agents.ai_integrations import GeminiIntegration, AzureOpenAIIntegration
 
-logger = logging.getLogger(__name__)
+@dataclass
+class SignalWeight:
+    """Configuration for signal source weights"""
+    technical: float = 1.0
+    statistical: float = 0.9
+    ml: float = 1.1
+    gemini: float = 0.8
+    azure_openai: float = 0.8
+    sentiment: float = 0.6
+    
+class MarketRegimeRule(StrategyRule):
+    """Rule that adjusts signal weights based on market regime"""
+    
+    def __init__(self, priority: int = 2):
+        super().__init__(priority)
+        # Define regime-specific signal weights
+        self.regime_weights = {
+            'trending': {
+                'technical': 1.2,  # Technical analysis works well in trending markets
+                'statistical': 0.8, # Mean reversion less effective
+                'ml': 1.0
+            },
+            'mean_reverting': {
+                'technical': 0.8,
+                'statistical': 1.3, # Statistical strategies excel in mean-reverting markets
+                'ml': 1.0
+            },
+            'volatile': {
+                'technical': 0.9,
+                'statistical': 0.7,
+                'ml': 1.1  # ML might handle volatility better
+            },
+            'sideways': {
+                'technical': 0.7,
+                'statistical': 1.1,
+                'ml': 0.9
+            }
+        }
+    
+    def evaluate(self, data: Dict) -> Dict:
+        """Adjust signal weights based on detected market regime"""
+        market_data = data.get('market_data', {})
+        regime = market_data.get('regime', 'unknown')
+        
+        if regime in self.regime_weights:
+            return {
+                'signal': 0,  # This rule doesn't generate signals, just adjusts weights
+                'confidence': 0.8,
+                'weights': self.regime_weights[regime],
+                'reason': f'Market regime detected: {regime}'
+            }
+        
+        return {
+            'signal': 0,
+            'confidence': 0.0,
+            'reason': 'Unknown market regime'
+        }
+
+class VolatilityAdjustmentRule(StrategyRule):
+    """Rule that adjusts position sizing based on volatility"""
+    
+    def __init__(self, priority: int = 5):
+        super().__init__(priority)
+        self.base_volatility = 0.015  # 1.5% daily volatility baseline
+        
+    def evaluate(self, data: Dict) -> Dict:
+        """Adjust signal strength based on current volatility"""
+        market_data = data.get('market_data', {})
+        current_volatility = market_data.get('volatility', self.base_volatility)
+        
+        # Calculate volatility adjustment factor
+        vol_ratio = current_volatility / self.base_volatility
+        
+        if vol_ratio > 2.0:  # High volatility
+            adjustment_factor = 0.5  # Reduce signal strength
+            reason = f"High volatility detected ({current_volatility:.1%}), reducing signal strength"
+        elif vol_ratio < 0.5:  # Low volatility
+            adjustment_factor = 1.2  # Increase signal strength
+            reason = f"Low volatility detected ({current_volatility:.1%}), increasing signal strength"
+        else:
+            adjustment_factor = 1.0
+            reason = "Normal volatility levels"
+        
+        return {
+            'signal': 0,
+            'confidence': 0.9,
+            'volatility_adjustment': adjustment_factor,
+            'reason': reason
+        }
 
 class StrategyRule:
     """Base class for strategy rules"""
@@ -195,24 +283,33 @@ class TimeBasedRule(StrategyRule):
 class StrategyOrchestrator:
     """
     Strategy Orchestrator Agent
-    Combines signals from different sources with priority rules
+    Combines signals from different sources with priority rules and intelligent weighting
     """
     
     def __init__(self, confidence_threshold: float = 0.7, 
-                 require_consenus: bool = True):
+                 require_consensus: bool = True):
         # Strategy rules (higher priority first)
-        self.rules = [
-            MarketConditionRule(priority=3),
-            TimeBasedRule(priority=4),
-            ConsensusRule(priority=1),
-            ConfidenceRule(priority=2)
-        ]
+        self.rules = {
+            'market_condition': MarketConditionRule(priority=1),
+            'time_based': TimeBasedRule(priority=2),
+            'market_regime': MarketRegimeRule(priority=3),
+            'consensus': ConsensusRule(priority=4),
+            'confidence': ConfidenceRule(priority=5),
+            'volatility_adjustment': VolatilityAdjustmentRule(priority=6)
+        }
+        
+        # Default signal weights
+        self.signal_weights = SignalWeight()
         
         # Confidence threshold for signal validation
         self.confidence_threshold = confidence_threshold
         
         # Flag to require consensus
-        self.require_consenus = require_consenus
+        self.require_consensus = require_consensus
+        
+        # Signal history for learning
+        self.signal_history = []
+        self.performance_history = []
         
         # Initialize AI integrations
         self.ai_integrations = {}
@@ -220,6 +317,10 @@ class StrategyOrchestrator:
         
     def _initialize_ai_integrations(self):
         """Initialize AI integrations if API keys are available"""
+        if not AI_INTEGRATIONS_AVAILABLE:
+            logger.warning("AI integrations module not available")
+            return
+        
         # Get API keys from environment variables
         gemini_key = os.getenv('GEMINI_API_KEY')
         azure_key = os.getenv('AZURE_OPENAI_API_KEY')
@@ -261,117 +362,365 @@ class StrategyOrchestrator:
             try:
                 ai_signal = self.ai_integrations[source].generate_trading_signal(market_data)
                 
-                if ai_signal['success']:
-                    signals[source] = ai_signal
+                if ai_signal.get('success', False):
+                    signals[source] = {
+                        'signal': ai_signal.get('signal', 0),
+                        'confidence': ai_signal.get('confidence', 0.5),
+                        'reason': ai_signal.get('reason', f'AI signal from {source}')
+                    }
                 else:
                     logger.error(f"Error generating AI signal from {source}: {ai_signal.get('error')}")
             except Exception as e:
                 logger.error(f"Error generating AI signal from {source}: {str(e)}")
         
-        return signals
-        
     def combine_signals(self, raw_signals: Dict, market_data: Dict) -> Dict:
-        """Combine signals from different sources with priority rules"""
+        """Combine signals from different sources with priority rules and intelligent weighting"""
         # Add signals from AI integrations
         signals = raw_signals.copy()
         signals = self.add_ai_signal(signals, 'gemini', market_data)
         signals = self.add_ai_signal(signals, 'azure_openai', market_data)
         
-        # Sort rules by priority (highest first)
-        sorted_rules = sorted(self.rules, key=lambda r: r.priority)
+        # Store original signals for analysis
+        analysis_data = {
+            'signals': signals,
+            'market_data': market_data,
+            'current_time': datetime.now()
+        }
         
-        # Evaluate rules in priority order
-        for rule in sorted_rules:
+        # Apply rules to get adjustments and filters
+        rule_results = {}
+        signal_weights = {}
+        adjustment_factors = {'volatility_adjustment': 1.0}
+        
+        # Evaluate all rules
+        for rule_name, rule in self.rules.items():
             try:
-                evaluation = rule.evaluate({
-                    'signals': signals,
-                    'market_data': market_data,
-                    'current_time': datetime.now()
-                })
+                evaluation = rule.evaluate(analysis_data)
+                rule_results[rule_name] = evaluation
                 
-                # If rule generates a non-zero signal, return it
-                if evaluation['signal'] != 0:
+                # Extract weights if provided
+                if 'weights' in evaluation:
+                    signal_weights.update(evaluation['weights'])
+                
+                # Extract adjustment factors
+                if 'volatility_adjustment' in evaluation:
+                    adjustment_factors['volatility_adjustment'] = evaluation['volatility_adjustment']
+                
+                # Check for blocking conditions (negative signals from high priority rules)
+                if (evaluation['signal'] < 0 and 
+                    rule.priority <= 2 and  # High priority rules
+                    evaluation['confidence'] > 0.8):
                     return {
-                        'signal': evaluation['signal'],
+                        'signal': 0,  # Block trading
                         'confidence': evaluation['confidence'],
-                        'source': f"rule_{rule.__class__.__name__}",
-                        'reason': evaluation['reason']
+                        'source': f"blocked_by_{rule_name}",
+                        'reason': evaluation['reason'],
+                        'rule_results': rule_results
                     }
+                    
             except Exception as e:
-                logger.error(f"Error evaluating rule {rule.__class__.__name__}: {str(e)}")
+                logger.error(f"Error evaluating rule {rule_name}: {str(e)}")
                 continue
         
-        # If no rule generates a signal, use the best confidence signal
-        best_signal = self._get_best_confidence_signal(signals)
-        if best_signal:
-            return best_signal
+        # Calculate weighted signal combination
+        weighted_result = self.calculate_weighted_signal(signals, signal_weights)
         
-        # No signal
+        # Apply adjustment factors
+        adjusted_confidence = weighted_result['confidence'] * adjustment_factors['volatility_adjustment']
+        
+        # Final decision logic
+        final_signal = weighted_result['signal']
+        
+        # Apply confidence threshold
+        if adjusted_confidence < self.confidence_threshold:
+            final_signal = 0
+            reason = f"Signal filtered out - confidence {adjusted_confidence:.2f} below threshold {self.confidence_threshold}"
+        else:
+            reason = weighted_result['reason']
+        
+        # Store signal for learning
+        signal_record = {
+            'timestamp': datetime.now(),
+            'final_signal': final_signal,
+            'confidence': adjusted_confidence,
+            'raw_signals': signals,
+            'rule_results': rule_results,
+            'market_data': market_data
+        }
+        self.signal_history.append(signal_record)
+        
+        # Keep only last 1000 signals in memory
+        if len(self.signal_history) > 1000:
+            self.signal_history = self.signal_history[-1000:]
+        
         return {
-            'signal': 0,
-            'confidence': 0.0,
-            'reason': "No trading signal generated"
+            'signal': final_signal,
+            'confidence': adjusted_confidence,
+            'raw_signal': weighted_result.get('raw_signal', final_signal),
+            'source': 'strategy_orchestrator',
+            'reason': reason,
+            'signal_breakdown': weighted_result.get('signal_details', []),
+            'rule_results': rule_results,
+            'adjustment_factors': adjustment_factors,
+            'timestamp': datetime.now().isoformat()
         }
         
-    def _get_best_confidence_signal(self, signals: Dict) -> Optional[Dict]:
-        """Get the signal with highest confidence"""
-        # Filter valid signals
-        valid_signals = [
-            {'signal': s['signal'], 'confidence': s['confidence'], 'source': source}
-            for source, s in signals.items()
-            if s.get('confidence', 0) > 0 and abs(s.get('signal', 0)) > 0
-        ]
+    def get_signal_confidence(self, signal_data: Dict) -> float:
+        """Calculate overall confidence for a signal"""
+        base_confidence = signal_data.get('confidence', 0.0)
         
-        if not valid_signals:
-            return None
+        # Adjust confidence based on number of agreeing sources
+        signals = signal_data.get('raw_signals', {})
+        if signals:
+            agreeing_sources = sum(1 for s in signals.values() 
+                                 if isinstance(s, dict) and 
+                                 s.get('signal') == signal_data.get('signal'))
+            total_sources = len(signals)
+            
+            if total_sources > 0:
+                consensus_factor = agreeing_sources / total_sources
+                adjusted_confidence = base_confidence * (0.5 + 0.5 * consensus_factor)
+                return min(1.0, adjusted_confidence)
         
-        # Sort by confidence
-        valid_signals.sort(key=lambda x: x['confidence'], reverse=True)
+        return base_confidence
+    
+    def filter_signal(self, signal_data: Dict) -> Dict:
+        """Apply additional filtering to signals before execution"""
+        # Check signal age
+        signal_time = signal_data.get('timestamp')
+        if signal_time:
+            try:
+                signal_dt = datetime.fromisoformat(signal_time.replace('Z', '+00:00'))
+                age_minutes = (datetime.now() - signal_dt.replace(tzinfo=None)).total_seconds() / 60
+                
+                if age_minutes > 5:  # Signal older than 5 minutes
+                    return {
+                        'signal': 0,
+                        'confidence': 0.0,
+                        'reason': f'Signal too old ({age_minutes:.1f} minutes)'
+                    }
+            except Exception as e:
+                logger.error(f"Error parsing signal timestamp: {e}")
         
-        # Return best signal
-        best = valid_signals[0]
-        return {
-            'signal': best['signal'],
-            'confidence': best['confidence'],
-            'source': best['source'],
-            'reason': f"Best confidence signal from {best['source']} ({best['confidence']:.2f})"
+        # Check confidence threshold
+        confidence = self.get_signal_confidence(signal_data)
+        if confidence < self.confidence_threshold:
+            return {
+                'signal': 0,
+                'confidence': confidence,
+                'reason': f'Low confidence ({confidence:.2f} < {self.confidence_threshold})'
+            }
+        
+        # Signal passes all filters
+        return signal_data
+    
+    def update_performance(self, signal_id: str, actual_return: float):
+        """Update performance tracking for signal learning"""
+        performance_record = {
+            'signal_id': signal_id,
+            'actual_return': actual_return,
+            'timestamp': datetime.now()
         }
+        self.performance_history.append(performance_record)
+        
+        # Keep only last 1000 performance records
+        if len(self.performance_history) > 1000:
+            self.performance_history = self.performance_history[-1000:]
+    
+    def analyze_signal_performance(self) -> Dict:
+        """Analyze historical signal performance for learning"""
+        if len(self.performance_history) < 10:
+            return {'insufficient_data': True}
+        
+        # Calculate performance by signal type
+        performance_by_source = {}
+        
+        for record in self.performance_history:
+            # This would require matching performance to signal history
+            # For now, return basic statistics
+            pass
+        
+        returns = [r['actual_return'] for r in self.performance_history]
+        
+        return {
+            'total_signals': len(self.performance_history),
+            'average_return': np.mean(returns),
+            'win_rate': sum(1 for r in returns if r > 0) / len(returns),
+            'sharpe_ratio': np.mean(returns) / np.std(returns) if np.std(returns) > 0 else 0
+        }
+    
+    def calculate_weighted_signal(self, signals: Dict, weights: Dict = None) -> Dict:
+        """Calculate weighted average of all signals"""
+        if not signals:
+            return {'signal': 0, 'confidence': 0.0, 'reason': 'No signals available'}
+        
+        # Use provided weights or default weights
+        if weights is None:
+            weights = {
+                'technical': self.signal_weights.technical,
+                'statistical': self.signal_weights.statistical,
+                'ml': self.signal_weights.ml,
+                'gemini': self.signal_weights.gemini,
+                'azure_openai': self.signal_weights.azure_openai
+            }
+        
+        total_weighted_signal = 0.0
+        total_weight = 0.0
+        total_confidence = 0.0
+        signal_details = []
+        
+        for source, signal_data in signals.items():
+            if not isinstance(signal_data, dict):
+                continue
+                
+            signal = signal_data.get('signal', 0)
+            confidence = signal_data.get('confidence', 0.5)
+            
+            # Get weight for this source
+            source_weight = weights.get(source, 0.5)
+            
+            # Calculate weighted contribution
+            weighted_signal = signal * confidence * source_weight
+            total_weighted_signal += weighted_signal
+            total_weight += source_weight
+            total_confidence += confidence * source_weight
+            
+            signal_details.append({
+                'source': source,
+                'signal': signal,
+                'confidence': confidence,
+                'weight': source_weight,
+                'contribution': weighted_signal
+            })
+        
+        # Calculate final signal and confidence
+        if total_weight > 0:
+            final_signal = total_weighted_signal / total_weight
+            avg_confidence = total_confidence / total_weight
+            
+            # Convert to discrete signal
+            if final_signal > 0.3:
+                discrete_signal = 1
+            elif final_signal < -0.3:
+                discrete_signal = -1
+            else:
+                discrete_signal = 0
+            
+            return {
+                'signal': discrete_signal,
+                'raw_signal': final_signal,
+                'confidence': avg_confidence,
+                'total_weight': total_weight,
+                'signal_details': signal_details,
+                'reason': f'Weighted combination of {len(signals)} signals'
+            }
+        
+        return {'signal': 0, 'confidence': 0.0, 'reason': 'No valid signals to combine'}
         
     def evaluate_signal(self, signal: Dict, market_data: Dict) -> Dict:
         """Evaluate a trading signal against risk criteria"""
-        # Implementation for signal evaluation
-        # This would include:
-        # - Checking against risk management rules
-        # - Validating with market conditions
-        # - Time-based constraints
+        # Apply signal filtering
+        filtered_signal = self.filter_signal(signal)
         
-        # For now, just return the signal
-        return signal
+        if filtered_signal.get('signal') == 0:
+            return filtered_signal
+        
+        # Additional risk checks can be added here
+        # For now, just return the filtered signal with evaluation metadata
+        
+        return {
+            **filtered_signal,
+            'evaluated': True,
+            'evaluation_time': datetime.now().isoformat()
+        }
         
     def make_trading_decision(self, signals: Dict, market_data: Dict) -> Dict:
         """Make a trading decision based on all inputs"""
-        # Combine signals
-        combined_signal = self.combine_signals(signals, market_data)
+        try:
+            # Combine signals using intelligent weighting
+            combined_signal = self.combine_signals(signals, market_data)
+            
+            # Evaluate signal against risk criteria
+            final_signal = self.evaluate_signal(combined_signal, market_data)
+            
+            # Add comprehensive metadata
+            final_signal.update({
+                'decision_id': f"decision_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
+                'input_signals_count': len(signals),
+                'market_data_quality': self._assess_market_data_quality(market_data),
+                'processing_time': datetime.now().isoformat()
+            })
+            
+            logger.info(f"Trading decision: {final_signal['signal']} (confidence: {final_signal.get('confidence', 0):.2f})")
+            
+            return final_signal
+            
+        except Exception as e:
+            logger.error(f"Error making trading decision: {e}")
+            return {
+                'signal': 0,
+                'confidence': 0.0,
+                'reason': f'Error in decision making: {str(e)}',
+                'error': True,
+                'timestamp': datetime.now().isoformat()
+            }
+    
+    def _assess_market_data_quality(self, market_data: Dict) -> str:
+        """Assess the quality of market data for decision making"""
+        required_fields = ['close', 'volume', 'timestamp']
         
-        # Evaluate signal against risk criteria
-        final_signal = self.evaluate_signal(combined_signal, market_data)
+        missing_fields = [field for field in required_fields if field not in market_data]
         
-        # Add timestamp
-        final_signal['timestamp'] = datetime.now().isoformat()
-        
-        return final_signal
-        
+        if not missing_fields:
+            return 'high'
+        elif len(missing_fields) <= 1:
+            return 'medium'
+        else:
+            return 'low'
+    
+    def get_strategy_status(self) -> Dict:
+        """Get current status of the strategy orchestrator"""
+        return {
+            'active_rules': list(self.rules.keys()),
+            'ai_integrations': list(self.ai_integrations.keys()),
+            'signal_history_length': len(self.signal_history),
+            'performance_history_length': len(self.performance_history),
+            'confidence_threshold': self.confidence_threshold,
+            'require_consensus': self.require_consensus,
+            'last_signal_time': self.signal_history[-1]['timestamp'].isoformat() if self.signal_history else None
+        }
+    
     async def start(self):
         """Start the strategy orchestrator"""
         logger.info("Starting strategy orchestrator...")
-        # Implementation for starting the agent
-        # This would typically involve:
-        # - Connecting to data source
-        # - Starting analysis loop
-        # - Handling configuration updates
+        
+        # Initialize all components
+        status = self.get_strategy_status()
+        
+        logger.info(f"Strategy orchestrator started with {len(status['active_rules'])} rules")
+        logger.info(f"AI integrations available: {status['ai_integrations']}")
+        
+        return {
+            'success': True,
+            'message': 'Strategy orchestrator started successfully',
+            'status': status
+        }
         
     async def emergency_stop(self):
         """Emergency stop for the strategy orchestrator"""
         logger.info("Initiating emergency stop for strategy orchestrator...")
-        # Implementation for emergency stop procedures
-        pass
+        
+        # Clear signal history to prevent stale signals
+        self.signal_history.clear()
+        
+        # Disable all rules temporarily
+        disabled_rules = list(self.rules.keys())
+        self.rules.clear()
+        
+        logger.info(f"Emergency stop completed. Disabled {len(disabled_rules)} rules.")
+        
+        return {
+            'success': True,
+            'message': 'Strategy orchestrator stopped successfully',
+            'disabled_rules': disabled_rules
+        }

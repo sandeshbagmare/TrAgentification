@@ -480,7 +480,7 @@ class StatisticalAgent:
         """Initialize the requested statistical strategies"""
         for strategy in self.strategies:
             if strategy.lower() in self.available_strategies:
-                self.active_strategies[strategy.lower()] = self.available_strategies[strategy.lower()]()
+                self.active_strategies[strategy.lower()] = self.available_strategies[strategy.lower()]
             else:
                 logger.warning(f"Unsupported statistical strategy: {strategy}")
     
@@ -584,30 +584,45 @@ class StatisticalAgent:
         
         for i, symbol1 in enumerate(symbols):
             for j, symbol2 in enumerate(symbols):
-                if i >= j:
+                if i >= j or symbol1 not in data or symbol2 not in data:
                     continue
                 
-                # Get common data for both symbols
-                common_data = data[symbol1].join(data[symbol2], how='inner', lsuffix='_1', rsuffix='_2')
-                
-                if len(common_data) < self.lookback_window:
+                try:
+                    # Ensure both dataframes have the same date range
+                    df1 = data[symbol1].copy()
+                    df2 = data[symbol2].copy()
+                    
+                    # Find common indices
+                    common_idx = df1.index.intersection(df2.index)
+                    
+                    if len(common_idx) < 30:  # Minimum 30 data points
+                        continue
+                    
+                    # Align data
+                    aligned_df1 = df1.loc[common_idx]
+                    aligned_df2 = df2.loc[common_idx]
+                    
+                    # Calculate returns
+                    returns1 = aligned_df1['close'].pct_change().dropna()
+                    returns2 = aligned_df2['close'].pct_change().dropna()
+                    
+                    if len(returns1) < 20 or len(returns2) < 20:
+                        continue
+                    
+                    # Calculate correlation
+                    correlation = returns1.corr(returns2)
+                    
+                    # Store correlation if above threshold
+                    if abs(correlation) > 0.7 and not pd.isna(correlation):
+                        pair = f"{symbol1}_{symbol2}"
+                        correlations[pair] = {
+                            'correlation': float(correlation),
+                            'symbols': [symbol1, symbol2],
+                            'confidence': float(abs(correlation))
+                        }
+                except Exception as e:
+                    logger.error(f"Error calculating correlation for {symbol1}-{symbol2}: {e}")
                     continue
-                
-                # Calculate returns
-                returns1 = common_data[f"close_1"].pct_change()
-                returns2 = common_data[f"close_2"].pct_change()
-                
-                # Calculate correlation
-                correlation = np.corrcoef(returns1[1:], returns2[1:])[0, 1]
-                
-                # Store correlation if above threshold
-                if abs(correlation) > 0.7:
-                    pair = f"{symbol1}_{symbol2}"
-                    correlations[pair] = {
-                        'correlation': correlation,
-                        'symbols': [symbol1, symbol2],
-                        'confidence': abs(correlation)
-                    }
         
         # Sort by correlation strength
         sorted_correlations = sorted(
@@ -622,17 +637,283 @@ class StatisticalAgent:
             'correlated_pairs': dict(sorted_correlations[:5])
         }
     
+    async def analyze_market_regime(self, data: pd.DataFrame) -> Dict:
+        """Analyze the current market regime (trending, mean-reverting, volatile)"""
+        if len(data) < 50:
+            return {'regime': 'unknown', 'confidence': 0.0, 'reason': 'Insufficient data'}
+        
+        try:
+            # Calculate various regime indicators
+            returns = data['close'].pct_change().dropna()
+            
+            # 1. Hurst Exponent for mean reversion vs trending
+            hurst_exp = self._calculate_hurst_exponent(returns)
+            
+            # 2. Volatility clustering (GARCH effects)
+            volatility = returns.rolling(window=20).std()
+            vol_clustering = volatility.autocorr(lag=1)
+            
+            # 3. Trend strength using ADX-like calculation
+            trend_strength = self._calculate_trend_strength(data)
+            
+            # 4. Market efficiency (randomness test)
+            efficiency = self._calculate_market_efficiency(returns)
+            
+            # Determine regime based on indicators
+            if hurst_exp < 0.4:
+                regime = 'mean_reverting'
+                confidence = (0.5 - hurst_exp) * 2
+            elif hurst_exp > 0.6:
+                regime = 'trending'
+                confidence = (hurst_exp - 0.5) * 2
+            else:
+                regime = 'random_walk'
+                confidence = 1 - abs(hurst_exp - 0.5) * 2
+            
+            # Adjust confidence based on trend strength
+            if trend_strength > 0.7:
+                if regime == 'trending':
+                    confidence = min(1.0, confidence + 0.2)
+                else:
+                    confidence = max(0.0, confidence - 0.2)
+            
+            return {
+                'regime': regime,
+                'confidence': confidence,
+                'hurst_exponent': hurst_exp,
+                'trend_strength': trend_strength,
+                'volatility_clustering': vol_clustering,
+                'market_efficiency': efficiency,
+                'reason': f'Hurst: {hurst_exp:.3f}, Trend: {trend_strength:.3f}'
+            }
+        except Exception as e:
+            logger.error(f"Error analyzing market regime: {e}")
+            return {'regime': 'unknown', 'confidence': 0.0, 'reason': str(e)}
+    
+    def _calculate_hurst_exponent(self, returns: pd.Series, lags: List[int] = None) -> float:
+        """Calculate Hurst exponent to determine mean reversion vs trending behavior"""
+        if lags is None:
+            lags = range(2, min(100, len(returns) // 4))
+        
+        try:
+            # R/S analysis
+            rs_values = []
+            for lag in lags:
+                if lag >= len(returns):
+                    continue
+                
+                # Divide series into chunks
+                chunks = [returns[i:i+lag] for i in range(0, len(returns)-lag+1, lag)]
+                rs_chunk_values = []
+                
+                for chunk in chunks:
+                    if len(chunk) < lag:
+                        continue
+                    
+                    # Calculate mean
+                    mean_chunk = chunk.mean()
+                    
+                    # Calculate cumulative deviations
+                    cumulative_deviations = (chunk - mean_chunk).cumsum()
+                    
+                    # Calculate range
+                    R = cumulative_deviations.max() - cumulative_deviations.min()
+                    
+                    # Calculate standard deviation
+                    S = chunk.std()
+                    
+                    if S > 0:
+                        rs_chunk_values.append(R / S)
+                
+                if rs_chunk_values:
+                    rs_values.append((lag, np.mean(rs_chunk_values)))
+            
+            if len(rs_values) < 5:
+                return 0.5  # Default to random walk
+            
+            # Linear regression to find Hurst exponent
+            lags_log = [np.log(lag) for lag, _ in rs_values]
+            rs_log = [np.log(rs) for _, rs in rs_values if rs > 0]
+            
+            if len(lags_log) != len(rs_log) or len(rs_log) < 5:
+                return 0.5
+            
+            # Simple linear regression
+            n = len(lags_log)
+            sum_x = sum(lags_log)
+            sum_y = sum(rs_log)
+            sum_xy = sum(x * y for x, y in zip(lags_log, rs_log))
+            sum_x2 = sum(x * x for x in lags_log)
+            
+            hurst = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+            
+            # Clamp to reasonable range
+            return max(0.0, min(1.0, hurst))
+            
+        except Exception as e:
+            logger.error(f"Error calculating Hurst exponent: {e}")
+            return 0.5
+    
+    def _calculate_trend_strength(self, data: pd.DataFrame) -> float:
+        """Calculate trend strength using directional movement"""
+        try:
+            # Calculate directional movement
+            high = data['high']
+            low = data['low']
+            close = data['close']
+            
+            # True Range
+            tr1 = high - low
+            tr2 = abs(high - close.shift(1))
+            tr3 = abs(low - close.shift(1))
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            
+            # Directional Movement
+            dm_plus = high.diff()
+            dm_minus = low.diff() * -1
+            
+            dm_plus[dm_plus < 0] = 0
+            dm_minus[dm_minus < 0] = 0
+            
+            # Smooth with 14-period average
+            tr_smooth = tr.rolling(window=14).mean()
+            dm_plus_smooth = dm_plus.rolling(window=14).mean()
+            dm_minus_smooth = dm_minus.rolling(window=14).mean()
+            
+            # Directional Indicators
+            di_plus = 100 * (dm_plus_smooth / tr_smooth)
+            di_minus = 100 * (dm_minus_smooth / tr_smooth)
+            
+            # ADX calculation
+            dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+            adx = dx.rolling(window=14).mean()
+            
+            return adx.iloc[-1] / 100.0 if not pd.isna(adx.iloc[-1]) else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error calculating trend strength: {e}")
+            return 0.0
+    
+    def _calculate_market_efficiency(self, returns: pd.Series) -> float:
+        """Calculate market efficiency using variance ratio test"""
+        try:
+            if len(returns) < 50:
+                return 0.5
+            
+            # Calculate variance ratio
+            k = 2  # lag
+            n = len(returns)
+            
+            # Variance of k-period returns
+            k_returns = returns.rolling(window=k).sum().dropna()
+            var_k = k_returns.var()
+            
+            # Variance of 1-period returns
+            var_1 = returns.var()
+            
+            # Variance ratio
+            if var_1 > 0:
+                variance_ratio = var_k / (k * var_1)
+                
+                # Convert to efficiency score (1 = perfectly efficient/random)
+                efficiency = abs(1 - variance_ratio)
+                return max(0.0, min(1.0, 1 - efficiency))
+            
+            return 0.5
+            
+        except Exception as e:
+            logger.error(f"Error calculating market efficiency: {e}")
+            return 0.5
+    
+    async def detect_anomalies(self, data: pd.DataFrame, window: int = 20) -> Dict:
+        """Detect statistical anomalies in price and volume data"""
+        try:
+            anomalies = {
+                'price_anomalies': [],
+                'volume_anomalies': [],
+                'return_anomalies': []
+            }
+            
+            # Price anomalies (using z-score)
+            price_zscore = zscore(data['close'])
+            price_anomaly_threshold = 2.5
+            
+            for i, z in enumerate(price_zscore):
+                if abs(z) > price_anomaly_threshold:
+                    anomalies['price_anomalies'].append({
+                        'index': i,
+                        'timestamp': data.index[i].isoformat() if hasattr(data.index[i], 'isoformat') else str(data.index[i]),
+                        'price': float(data['close'].iloc[i]),
+                        'zscore': float(z),
+                        'severity': 'high' if abs(z) > 3 else 'medium'
+                    })
+            
+            # Volume anomalies
+            volume_zscore = zscore(data['volume'])
+            volume_anomaly_threshold = 2.0
+            
+            for i, z in enumerate(volume_zscore):
+                if abs(z) > volume_anomaly_threshold:
+                    anomalies['volume_anomalies'].append({
+                        'index': i,
+                        'timestamp': data.index[i].isoformat() if hasattr(data.index[i], 'isoformat') else str(data.index[i]),
+                        'volume': int(data['volume'].iloc[i]),
+                        'zscore': float(z),
+                        'severity': 'high' if abs(z) > 3 else 'medium'
+                    })
+            
+            # Return anomalies
+            returns = data['close'].pct_change().dropna()
+            return_zscore = zscore(returns)
+            return_anomaly_threshold = 2.0
+            
+            for i, z in enumerate(return_zscore):
+                if abs(z) > return_anomaly_threshold:
+                    anomalies['return_anomalies'].append({
+                        'index': i + 1,  # +1 because returns start from index 1
+                        'timestamp': data.index[i + 1].isoformat() if hasattr(data.index[i + 1], 'isoformat') else str(data.index[i + 1]),
+                        'return': float(returns.iloc[i]),
+                        'zscore': float(z),
+                        'severity': 'high' if abs(z) > 3 else 'medium'
+                    })
+            
+            return {
+                'success': True,
+                'anomalies': anomalies,
+                'summary': {
+                    'total_price_anomalies': len(anomalies['price_anomalies']),
+                    'total_volume_anomalies': len(anomalies['volume_anomalies']),
+                    'total_return_anomalies': len(anomalies['return_anomalies'])
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting anomalies: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
     async def start(self):
         """Start the statistical agent"""
         logger.info("Starting statistical agent...")
-        # Implementation for starting the agent
-        # This would typically involve:
-        # - Connecting to data source
-        # - Starting analysis loop
-        # - Loading configuration
+        logger.info(f"Active strategies: {list(self.active_strategies.keys())}")
+        
+        # Initialize any required resources
+        return {
+            'success': True,
+            'message': 'Statistical agent started successfully',
+            'active_strategies': list(self.active_strategies.keys())
+        }
         
     async def emergency_stop(self):
         """Emergency stop for the statistical agent"""
         logger.info("Initiating emergency stop for statistical agent...")
-        # Implementation for emergency stop procedures
-        pass
+        
+        # Clean up resources
+        self.active_strategies.clear()
+        
+        return {
+            'success': True,
+            'message': 'Statistical agent stopped successfully'
+        }
